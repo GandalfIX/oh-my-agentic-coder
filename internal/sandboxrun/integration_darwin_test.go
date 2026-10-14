@@ -246,6 +246,20 @@ func TestIntegrationKeychainDenied(t *testing.T) {
 	}
 }
 
+func TestIntegrationSystemRootCertificatesReadable(t *testing.T) {
+	// TLS clients on Secure Transport (e.g. Rust native-tls) look up Apple's
+	// root certificates through securityd. When the sandbox denied that
+	// service, every HTTPS request failed with "bad certificate format"
+	// (#340). Reading the root store with `security` exercises the same
+	// lookup without needing the network.
+	g := testGrants(t)
+	out, code := runSandboxed(t, g, "/usr/bin/security", "find-certificate",
+		"/System/Library/Keychains/SystemRootCertificates.keychain")
+	if code != 0 {
+		t.Errorf("system root certificates must be readable in the sandbox: exit=%d out=%s", code, out)
+	}
+}
+
 func TestIntegrationNetworkDenied(t *testing.T) {
 	// Spin up a local HTTP server; blocked-mode sandbox must not reach it.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

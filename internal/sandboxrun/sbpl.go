@@ -32,9 +32,15 @@ func GenerateSBPL(g *Grants) string {
 
 	// Mach: allow lookups generally but wall off the Keychain daemons
 	// (nono parity; `security` and friends fail cleanly).
+	//
+	// com.apple.SecurityServer (securityd) stays reachable: Security.framework
+	// needs it to read Apple's root certificates, so TLS clients built on
+	// Secure Transport (e.g. Rust native-tls in Copilot CLI >= 1.0.93) fail
+	// with "bad certificate format" without it (#340). Keychain items stay
+	// unreadable: the legacy keychain API opens the keychain files in-process,
+	// and ~/Library/Keychains and /Library/Keychains are protected paths.
 	b.WriteString("(allow mach-lookup)\n")
 	for _, svc := range []string{
-		"com.apple.SecurityServer",
 		"com.apple.securityd",
 		"com.apple.security.keychaind",
 		"com.apple.secd",

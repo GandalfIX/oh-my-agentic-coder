@@ -44,7 +44,6 @@ func TestSBPLBaselineStructure(t *testing.T) {
 func TestSBPLKeychainDenied(t *testing.T) {
 	p := GenerateSBPL(baseGrants())
 	for _, svc := range []string{
-		"com.apple.SecurityServer",
 		"com.apple.securityd",
 		"com.apple.security.keychaind",
 		"com.apple.secd",
@@ -53,6 +52,11 @@ func TestSBPLKeychainDenied(t *testing.T) {
 		if !strings.Contains(p, `(deny mach-lookup (global-name "`+svc+`"))`) {
 			t.Errorf("keychain daemon %s not denied", svc)
 		}
+	}
+	// securityd's SecurityServer service is needed for TLS certificate
+	// trust (#340); denying it breaks Secure Transport clients.
+	if strings.Contains(p, `"com.apple.SecurityServer"`) {
+		t.Error("com.apple.SecurityServer must stay reachable for TLS trust evaluation")
 	}
 }
 

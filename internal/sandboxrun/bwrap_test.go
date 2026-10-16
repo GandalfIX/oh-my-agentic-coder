@@ -291,6 +291,33 @@ func TestBwrapProtectedSymlinkMaskedInPlace(t *testing.T) {
 	}
 }
 
+// symlinkMountDests finds the mounts bwrap >= 0.12 refuses: those onto a
+// symlink inside an earlier bind, whether a protected path's mask or a
+// granted symlink kept by BuildBwrapArgv.
+func TestSymlinkMountDests(t *testing.T) {
+	home, other := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".netrc"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, jdk, solo := filepath.Join(home, ".env"), filepath.Join(home, "jdk"), filepath.Join(other, "solo")
+	symlinkAt(t, "/nonexistent/.env", env)
+	symlinkAt(t, "/opt/jdk", jdk)
+	symlinkAt(t, home, solo) // not inside another bind: bwrap creates a fresh dir
+	g := &Grants{
+		Workdir:        home,
+		AllowPaths:     []string{home},
+		ReadPaths:      []string{jdk, solo},
+		ProtectedPaths: []string{env, filepath.Join(home, ".netrc")},
+	}
+	argv, err := BuildBwrapArgv(g, []string{"x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := symlinkMountDests(argv), []string{jdk, env}; !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestStage2ArgsFiltered(t *testing.T) {
 	got := Stage2Args(bwrapGrants())
 	want := []string{

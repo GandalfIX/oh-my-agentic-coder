@@ -213,6 +213,35 @@ func exists(p string) bool {
 	return err == nil
 }
 
+// symlinkMountDests returns the destinations in a bwrap argv that are
+// symlinks on the host inside an earlier grant bind. There the sandbox
+// shows them as symlinks, and bwrap >= 0.12 refuses to mount onto them.
+func symlinkMountDests(argv []string) []string {
+	var bound []*mount
+	var out []string
+	for i := 0; i < len(argv) && argv[i] != "--"; i++ {
+		var src, dest string
+		switch argv[i] {
+		case "--bind", "--ro-bind", "--bind-try", "--ro-bind-try":
+			src, dest = argv[i+1], argv[i+2]
+			i += 2
+		case "--tmpfs":
+			dest = argv[i+1]
+			i++
+		default:
+			continue
+		}
+		if fi, err := os.Lstat(dest); err == nil && fi.Mode()&os.ModeSymlink != 0 &&
+			(coveredByAny(dest, bound) || (len(bound) > 0 && bound[0].path == "/")) {
+			out = append(out, dest)
+		}
+		if src == dest { // a grant; masks and tmpfs show no host content
+			bound = append(bound, &mount{path: dest})
+		}
+	}
+	return out
+}
+
 // redundantLinkMount reports whether m is a symlink inside another mount
 // whose target the sandbox already shows with the same access as m.
 func redundantLinkMount(m *mount, mounts []*mount) bool {

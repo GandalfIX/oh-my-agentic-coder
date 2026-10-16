@@ -223,6 +223,29 @@ func TestIntegrationNestedSymlinkGrant(t *testing.T) {
 	}
 }
 
+// A protected symlink inside the workdir can't be masked on bwrap >= 0.12.
+// omac must say so and name the path instead of passing on bwrap's error;
+// older bwrap still masks it, so there the launch must go ahead.
+func TestIntegrationSymlinkDestinationError(t *testing.T) {
+	requireBwrap(t)
+	g := linuxTestGrants(t)
+	g.NetworkMode = sandboxprofile.ModeOpen // no Landlock needed for this check
+	env := filepath.Join(g.Workdir, ".env")
+	symlinkAt(t, "shared.env", env)
+	g.ProtectedPaths = append(g.ProtectedPaths, env)
+	_, err := BuildChildArgv(g, []string{"true"})
+	t.Logf("launch error: %v", err)
+	if !bwrapRefusesSymlinkDest() {
+		if err != nil {
+			t.Errorf("older bwrap masks the symlink, launch must go ahead: %v", err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), env) || !strings.Contains(err.Error(), "override_deny") {
+		t.Errorf("want an error naming %s and the fix, got: %v", env, err)
+	}
+}
+
 // TestIntegrationProtectedMarkerLaunchAndContent guards the regression
 // where the marker bind sources were deleted before bwrap exec: with
 // DenialText set and a protected path present, the sandbox must still

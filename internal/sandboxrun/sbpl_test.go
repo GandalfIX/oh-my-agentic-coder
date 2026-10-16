@@ -44,7 +44,6 @@ func TestSBPLBaselineStructure(t *testing.T) {
 func TestSBPLKeychainDenied(t *testing.T) {
 	p := GenerateSBPL(baseGrants())
 	for _, svc := range []string{
-		"com.apple.SecurityServer",
 		"com.apple.securityd",
 		"com.apple.security.keychaind",
 		"com.apple.secd",
@@ -53,6 +52,34 @@ func TestSBPLKeychainDenied(t *testing.T) {
 		if !strings.Contains(p, `(deny mach-lookup (global-name "`+svc+`"))`) {
 			t.Errorf("keychain daemon %s not denied", svc)
 		}
+	}
+	// securityd's SecurityServer service is needed for TLS certificate
+	// trust (#340); denying it breaks Secure Transport clients.
+	if strings.Contains(p, `"com.apple.SecurityServer"`) {
+		t.Error("com.apple.SecurityServer must stay reachable for TLS trust evaluation")
+	}
+}
+
+func TestSBPLKeychainFilesDeniedByName(t *testing.T) {
+	// With securityd reachable, a readable keychain file anywhere (e.g.
+	// /tmp/signing.keychain-db) would be decryptable, so keychain files
+	// are denied by name after every allow. Apple's root store is the
+	// one exception and must come after the deny to win.
+	p := GenerateSBPL(baseGrants())
+	deny := `(deny file-read* (regex #"\.[kK][eE][yY][cC][hH][aA][iI][nN](-[dD][bB])?$"))`
+	roots := `(allow file-read* (subpath "/System/Library/Keychains"))`
+	di, ri := strings.Index(p, deny), strings.Index(p, roots)
+	if di < 0 || ri < 0 {
+		t.Fatalf("keychain name deny or root-store allow missing:\n%s", p)
+	}
+	if di < strings.Index(p, `(allow file-read* (subpath "/work"))`) {
+		t.Error("keychain name deny must come after the grant allows")
+	}
+	if ri < di {
+		t.Error("root-store allow must come after the keychain name deny")
+	}
+	if !strings.Contains(p, `(deny file-write* (regex #"\.[kK][eE][yY][cC][hH][aA][iI][nN](-[dD][bB])?$"))`) {
+		t.Error("keychain files must not be writable either")
 	}
 }
 

@@ -102,10 +102,29 @@ What happens then depends on the system:
   `.env`, however deep). This rule also covers the skipped trees above and
   files created during the session. omac notes the directory in the sandbox
   log. Upper and lower case count as the same, as on the macOS disk.
+
   Launch still stops in two cases the rule cannot express: you made one such
   file readable with an absolute `override_deny` path inside that directory
   (the rule would hide it too), or a `filesystem.deny` pattern uses `[...]`
   or `\` (for example `*.[pk]em`).
+
+On macOS, keychain files are also blocked: the keychain folders
+(`~/Library/Keychains`, `/Library/Keychains`) and any file named
+`*.keychain` or `*.keychain-db` anywhere, for example a CI signing keychain
+in `/tmp`. Apple's read-only certificate store in `/System/Library/Keychains`
+stays readable, because HTTPS clients need it to check certificates.
+
+**Known limitation — two keychain gaps remain on macOS.** HTTPS clients such
+as Copilot CLI need the macOS security service (`securityd`), so the sandbox
+lets the agent talk to it. That service hands out the items of any unlocked
+keychain whose file the agent can read, which leaves two gaps:
+
+- A keychain stored outside the keychain folders under a name without the
+  `.keychain` extension can be read while it is unlocked. It only exists if
+  someone created it with an explicit path, such as
+  `security create-keychain /tmp/plainname`.
+- The agent can send the service other requests, for example to lock your
+  keychains.
 
 ### Secrets
 

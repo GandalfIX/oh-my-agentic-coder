@@ -9,13 +9,20 @@ import (
 	"github.com/TNG/oh-my-agentic-coder/internal/sandboxprofile"
 )
 
+// sbplKeychainNameRegex matches keychain files by name anywhere, in any
+// letter case: login.keychain-db, ci.keychain, X.KEYCHAIN.
+const sbplKeychainNameRegex = `\.[kK][eE][yY][cC][hH][aA][iI][nN](-[dD][bB])?$`
+
 // GenerateSBPL renders the Seatbelt profile for the grant set. Pure
 // string generation — unit-testable on every platform; only the exec
 // path is darwin-specific.
 //
-// Rule order matters: read allows -> write allows -> protected-path denies.
-// Seatbelt is last-match-wins, so protected denies placed last override
-// both read and write allows for those paths.
+// Rule order matters: read allows -> write allows -> protected-path denies
+// -> secret-name denies (.env, ...) -> keychain name-deny -> read-only
+// root-store re-allow. Seatbelt is last-match-wins, so the denies override
+// both read and write allows for those paths. The root-store re-allow is
+// the one rule allowed to undo a deny; any file allow emitted later (e.g.
+// the /dev devices) must not cover a protected path or a keychain file.
 func GenerateSBPL(g *Grants) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
@@ -32,9 +39,15 @@ func GenerateSBPL(g *Grants) string {
 
 	// Mach: allow lookups generally but wall off the Keychain daemons
 	// (nono parity; `security` and friends fail cleanly).
+	//
+	// com.apple.SecurityServer (securityd) stays reachable: Security.framework
+	// needs it to read Apple's root certificates, so TLS clients built on
+	// Secure Transport (e.g. Rust native-tls in Copilot CLI >= 1.0.93) fail
+	// with "bad certificate format" without it (#340). Keychain items stay
+	// unreadable: the legacy keychain API opens the keychain files in-process,
+	// and keychain files are denied by folder and by name (see below).
 	b.WriteString("(allow mach-lookup)\n")
 	for _, svc := range []string{
-		"com.apple.SecurityServer",
 		"com.apple.securityd",
 		"com.apple.security.keychaind",
 		"com.apple.secd",
@@ -89,7 +102,7 @@ func GenerateSBPL(g *Grants) string {
 	}
 	b.WriteString("\n")
 
-	// --- Protected-path denies (after all allows, so last-match-wins blocks both reads and writes) ---
+	// --- Protected-path and keychain denies (after all allows, so last-match-wins blocks both reads and writes) ---
 	for _, p := range g.ProtectedPaths {
 		for _, fp := range pathForms(p) {
 			fmt.Fprintf(&b, "(deny file-read* (subpath %s))\n", sbplQuote(fp))
@@ -97,6 +110,16 @@ func GenerateSBPL(g *Grants) string {
 		}
 	}
 	b.WriteString(sbplNameDenies(g))
+	// securityd is reachable (see the mach section), so it decrypts any
+	// unlocked keychain whose file the process can read. Keychains outside
+	// the protected folders (e.g. a CI signing keychain in /tmp) must be
+	// hidden by name. Apple's read-only root stores stay readable: TLS
+	// trust evaluation needs them. The re-allow must stay directly after
+	// the name-deny: moved before it, the deny would hide the root store
+	// and break TLS again.
+	fmt.Fprintf(&b, "(deny file-read* (regex #\"%s\"))\n", sbplKeychainNameRegex)
+	fmt.Fprintf(&b, "(deny file-write* (regex #\"%s\"))\n", sbplKeychainNameRegex)
+	b.WriteString("(allow file-read* (subpath \"/System/Library/Keychains\"))\n")
 	b.WriteString("\n")
 
 	// --- Devices every process needs ---

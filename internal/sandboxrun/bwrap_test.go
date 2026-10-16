@@ -195,6 +195,102 @@ func TestBwrapUnixSocketDirMissingUnderTmpKeepsTmpfs(t *testing.T) {
 	}
 }
 
+// symlinkAt creates link -> target, making link's parent dir first.
+func symlinkAt(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Issue #302: inside the sandbox, a granted symlink that sits in another
+// grant already exists as that symlink, and bwrap >= 0.12 refuses to mount
+// onto it. When the link's target is visible anyway, the bind is dropped.
+func TestBwrapNestedSymlinkGrantDropped(t *testing.T) {
+	usr := filepath.Join(t.TempDir(), "usr")
+	if err := os.MkdirAll(filepath.Join(usr, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	symlinkAt(t, "lib", filepath.Join(usr, "lib64")) // Arch: /usr/lib64 -> lib
+	g := &Grants{Workdir: "/", ReadPaths: []string{usr, filepath.Join(usr, "lib64")}}
+	argv, err := BuildBwrapArgv(g, []string{"x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(argv, " ")
+	if strings.Contains(joined, "lib64") {
+		t.Errorf("nested symlink must not be a bind destination: %s", joined)
+	}
+	if !strings.Contains(joined, "--ro-bind "+usr+" "+usr) {
+		t.Errorf("parent grant missing: %s", joined)
+	}
+}
+
+// A symlink in a granted tree may have been planted by the agent, so its
+// target must never become a bind of its own. Where dropping the bind would
+// change access, it stays as is and bwrap refuses to start.
+func TestBwrapNestedSymlinkGrantKeptUnlessRedundant(t *testing.T) {
+	wd := t.TempDir()
+	data := filepath.Join(wd, "data")
+	if err := os.Mkdir(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	toRoot, toData := filepath.Join(wd, "lib"), filepath.Join(wd, "data-link")
+	symlinkAt(t, "/", toRoot)
+	symlinkAt(t, "data", toData)
+
+	for _, tc := range []struct {
+		name string
+		link string
+		g    *Grants
+	}{
+		{"target outside every grant", toRoot, &Grants{Workdir: wd, AllowPaths: []string{wd}, ReadPaths: []string{toRoot}}},
+		{"rw link into a ro tree", toData, &Grants{Workdir: wd, ReadPaths: []string{wd}, AllowPaths: []string{toData}}},
+		{"ro link into a rw tree", toData, &Grants{Workdir: wd, AllowPaths: []string{wd}, ReadPaths: []string{toData}}},
+	} {
+		argv, err := BuildBwrapArgv(tc.g, []string{"x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(argv, " ")
+		if strings.Contains(joined, " / / ") || strings.Contains(joined, " "+data+" "+data) {
+			t.Errorf("%s: symlink target bound: %s", tc.name, joined)
+		}
+		if !strings.Contains(joined, " "+tc.link+" "+tc.link) {
+			t.Errorf("%s: grant must stay for bwrap to refuse: %s", tc.name, joined)
+		}
+	}
+}
+
+// A protected symlink keeps its mask in place, so bwrap >= 0.12 refuses to
+// start. Moving the mask to the link's target is unsafe: the same secret can
+// stay visible under another name, e.g. when the link is itself a grant
+// (bwrap then binds the target's content at the link's name) or the target
+// is reachable through a symlinked grant.
+func TestBwrapProtectedSymlinkMaskedInPlace(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "netrc"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	netrc := filepath.Join(home, ".netrc")
+	symlinkAt(t, "netrc", netrc)
+	g := &Grants{Workdir: "/", ReadPaths: []string{home, netrc}, ProtectedPaths: []string{netrc}}
+	argv, err := BuildBwrapArgv(g, []string{"x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "--ro-bind /dev/null "+netrc) {
+		t.Errorf("protected symlink must be masked in place: %s", joined)
+	}
+	if strings.Contains(joined, "/dev/null "+filepath.Join(home, "netrc")) {
+		t.Errorf("mask must not move to the link's target: %s", joined)
+	}
+}
+
 func TestStage2ArgsFiltered(t *testing.T) {
 	got := Stage2Args(bwrapGrants())
 	want := []string{

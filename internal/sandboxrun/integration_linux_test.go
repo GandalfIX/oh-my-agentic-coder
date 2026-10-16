@@ -193,6 +193,36 @@ func TestIntegrationProtectedMaskedUnderGrant(t *testing.T) {
 	}
 }
 
+// Issue #302: a granted symlink inside another grant (/usr/lib64 -> lib
+// under /usr) crashed bwrap >= 0.12 ("Can't mount on symlink destination").
+// The sandbox must start and the path must still resolve.
+func TestIntegrationNestedSymlinkGrant(t *testing.T) {
+	requireBwrap(t)
+	home := stagedHome(t)
+	usr := filepath.Join(home, "usr")
+	if err := os.MkdirAll(filepath.Join(usr, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(usr, "lib", "libc.so"), []byte("LIBC"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	symlinkAt(t, "lib", filepath.Join(usr, "lib64"))
+
+	p := &sandboxprofile.Profile{
+		Workdir:    sandboxprofile.Workdir{Access: sandboxprofile.AccessReadWrite},
+		Filesystem: sandboxprofile.Filesystem{Read: []string{home, filepath.Join(usr, "lib64")}},
+		Network:    sandboxprofile.Network{Mode: sandboxprofile.ModeBlocked},
+	}
+	g, err := ResolveGrants(p, t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, code := runBwrapped(t, g, "cat", filepath.Join(usr, "lib64", "libc.so"))
+	if code != 0 || !strings.Contains(out, "LIBC") {
+		t.Errorf("nested symlinked grant unreadable (exit %d): %s", code, out)
+	}
+}
+
 // TestIntegrationProtectedMarkerLaunchAndContent guards the regression
 // where the marker bind sources were deleted before bwrap exec: with
 // DenialText set and a protected path present, the sandbox must still

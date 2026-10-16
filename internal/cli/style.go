@@ -92,7 +92,12 @@ func (s styler) status(w *os.File, tag, detail string, codes ...string) {
 
 // setLine prints a "set NAME = VALUE  (source)" assignment line with the
 // name bolded, the value greened, and the optional source dimmed.
+//
+// The value can be a skill's `default:` from omac.yaml and the source can
+// name its `default_from_env:` variable, so all three parts go through
+// stripControlChars.
 func (s styler) setLine(w *os.File, name, value, source string) {
+	name, value, source = stripControlChars(name), stripControlChars(value), stripControlChars(source)
 	tail := ""
 	if source != "" {
 		tail = s.gray(" " + source)
@@ -156,6 +161,15 @@ func stripControlChars(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// oneLine prepares text that is printed on a single line, such as a
+// skill's description. Line breaks and tabs become spaces, so that
+// "line one\nline two" reads "line one line two" instead of running the
+// words together, and then the remaining control characters are removed.
+func oneLine(s string) string {
+	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(s)
+	return strings.TrimSpace(stripControlChars(s))
 }
 
 // visibleLen returns the display width of s, ignoring ANSI SGR escape

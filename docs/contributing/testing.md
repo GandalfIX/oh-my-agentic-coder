@@ -81,8 +81,8 @@ E2E tests use temporary home directories and do not modify your real keychain or
 | `resize` | `omac start opencode` runs in a pseudo-terminal that is resized from 24x80 to 50x160; OpenCode must redraw at the new size (Linux only) | no | OpenCode only         |
 
 **For the `llm` stage:** credentials are read from environment variables at runtime — `internal/e2e/versions.go` declares which variable names, and `.github/workflows/e2e.yml` wires them from GitHub Actions encrypted secrets. When running tests locally, you supply credentials through your own shell environment.
-All harnesses except claude-code use a shared model gateway (`zai-org/GLM-5.2`) because it is cost-effective.
-claude-code is the exception because it communicates directly with the Anthropic API — it cannot route through a third-party gateway — so it uses `claude-sonnet-5` with an Anthropic key.
+All harnesses except claude-code use a shared model gateway (`zai-org/GLM-5.3`) because it is cost-effective.
+claude-code is the exception because it communicates directly with the Anthropic API — it cannot route through a third-party gateway — so it uses `claude-sonnet-5-5` with an Anthropic key.
 
 ### With the wrapper scripts
 

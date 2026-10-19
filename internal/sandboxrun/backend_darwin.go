@@ -4,6 +4,7 @@ package sandboxrun
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 )
 
@@ -42,6 +43,11 @@ func BuildChildArgv(g *Grants, innerArgv []string) ([]string, error) {
 		return nil, err
 	}
 	gz := *g
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve sandbox home directory: %w", err)
+	}
+	gz.HomeDir = home
 	gz.ReadPaths = append(append([]string{}, g.ReadPaths...), resolveInnerBinaryDirs(innerArgv)...)
 	profile := GenerateSBPL(&gz)
 	argv := []string{sandboxExecPath, "-p", profile, "--"}

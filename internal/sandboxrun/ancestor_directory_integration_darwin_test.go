@@ -15,6 +15,16 @@ import (
 )
 
 func TestIntegrationAncestorDirectoryData(t *testing.T) {
+	t.Run("inside-home", func(t *testing.T) {
+		testIntegrationAncestorDirectoryData(t, false)
+	})
+	t.Run("outside-home", func(t *testing.T) {
+		testIntegrationAncestorDirectoryData(t, true)
+	})
+}
+
+func testIntegrationAncestorDirectoryData(t *testing.T, outsideHome bool) {
+	t.Helper()
 	if os.Getenv("OMAC_SOCKET") != "" || os.Getenv("E2E_NESTED") == "1" {
 		t.Skip("requires a macOS host outside omac; nested Seatbelt is not reproduction evidence")
 	}
@@ -22,23 +32,34 @@ func TestIntegrationAncestorDirectoryData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	home, err := os.MkdirTemp(hostHome, ".omac-oc2-")
+	root, err := os.MkdirTemp(hostHome, ".omac-oc2-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.RemoveAll(home); err != nil {
+		if err := os.RemoveAll(root); err != nil {
 			t.Error(err)
 		}
 	})
+	home := filepath.Join(root, "home")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 	workdir := filepath.Join(home, "Documents", "git", "project")
+	if outsideHome {
+		workdir = filepath.Join(root, "project")
+	}
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(home, ".ssh"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{filepath.Join(home, "sibling.txt"), filepath.Join(home, ".ssh", "key")} {
+	if err := os.Mkdir(filepath.Join(home, "ungranted"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(home, "sibling.txt"), filepath.Join(home, ".ssh", "key"), filepath.Join(home, "ungranted", "file")} {
 		if err := os.WriteFile(path, []byte("outside-workdir"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -85,6 +106,7 @@ func TestIntegrationAncestorDirectoryData(t *testing.T) {
 		{"sibling-file", []string{"/bin/cat", filepath.Join(home, "sibling.txt")}, false},
 		{"write-sibling", []string{"/bin/sh", "-c", `printf x > "$HOME/new-file"`}, false},
 		{"protected", []string{"/bin/ls", filepath.Join(home, ".ssh")}, false},
+		{"ungranted-directory", []string{"/bin/ls", filepath.Join(home, "ungranted")}, false},
 		{"symlink-escape", []string{"/bin/cat", filepath.Join(workdir, "escape")}, false},
 		{"workdir-read-write", []string{"/bin/sh", "-c", `printf inside-workdir > probe && /bin/cat probe`}, true},
 	}
@@ -123,6 +145,12 @@ func TestIntegrationAncestorDirectoryData(t *testing.T) {
 			}
 			if (code == 0) != tc.wantOK {
 				t.Errorf("exit=%d wantOK=%v\nstdout/stderr:\n%s", code, tc.wantOK, out)
+			}
+			if tc.name == "getcwd" && strings.TrimSpace(string(out)) != canonical {
+				t.Errorf("home resolved to %q, want %q", out, canonical)
+			}
+			if tc.name == "list" && !strings.Contains(string(out), "sibling.txt") {
+				t.Errorf("home entry names should be visible: %q", out)
 			}
 			if tc.name == "workdir-read-write" && string(out) != "inside-workdir" {
 				t.Errorf("allowed read/write did not round-trip: %q", out)

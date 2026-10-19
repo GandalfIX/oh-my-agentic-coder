@@ -25,6 +25,7 @@ import (
 // the platform backends.
 type Grants struct {
 	Workdir string // absolute; always the child's cwd
+	HomeDir string // literal directory access for macOS home resolution; not recursive
 
 	// Path grants (expanded, absolute, existing).
 	ReadPaths  []string // read-only

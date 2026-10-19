@@ -84,6 +84,13 @@ func GenerateSBPL(g *Grants) string {
 	for _, p := range ancestorDirs([]string{g.Workdir}) {
 		fmt.Fprintf(&b, "(allow file-read-data (literal %s))\n", sbplQuote(p))
 	}
+	// Bun's realpath opens HOME even when it is not a workdir ancestor.
+	// Literal access exposes entry names, but not their contents.
+	if g.HomeDir != "" {
+		for _, p := range pathForms(g.HomeDir) {
+			fmt.Fprintf(&b, "(allow file-read-data file-read-metadata (literal %s))\n", sbplQuote(p))
+		}
+	}
 	// DYLD-injection defense: only readable paths may be mapped
 	// executable. (allow file-read* implies open; mapping is separate.)
 	for _, p := range readable {

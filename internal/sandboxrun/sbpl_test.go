@@ -352,7 +352,14 @@ func TestSBPLQuoteEscaping(t *testing.T) {
 func TestAncestorDirectoryReadRules(t *testing.T) {
 	g := baseGrants()
 	g.Workdir = "/work/app"
+	g.HomeDir = "/Users/u"
 	p := GenerateSBPL(g)
+	if !strings.Contains(p, `(allow file-read-data file-read-metadata (literal "/Users/u"))`) {
+		t.Error("home directory must be resolvable even outside the workdir's ancestors")
+	}
+	if strings.Contains(p, `(subpath "/Users/u")`) {
+		t.Error("home directory must not receive recursive access")
+	}
 	if !strings.Contains(p, `(allow file-read-data (literal "/work"))`) {
 		t.Error("working-directory ancestor must allow file-read-data")
 	}

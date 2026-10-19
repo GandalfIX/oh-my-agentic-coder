@@ -758,6 +758,17 @@ func walkGlobMatches(roots, globs, protectedDirs []string, cache *denyScanCache)
 // still not followed: a folder listing reports a link as a link, and any
 // real-tree location the agent can reach belongs to some granted root
 // whose own scan emits its spelling.
+// readDirHook, when non-nil, replaces os.ReadDir in the deny-scan walk.
+// Tests use it to inject transient read failures.
+var readDirHook atomic.Pointer[func(string) ([]os.DirEntry, error)]
+
+func readDir(dir string) ([]os.DirEntry, error) {
+	if f := readDirHook.Load(); f != nil {
+		return (*f)(dir)
+	}
+	return os.ReadDir(dir)
+}
+
 func walkOneDenyRoot(root string, globs []string, protected map[string]bool, readDirs chan struct{}, cache *denyScanCache) (matches []string, hitCap bool) {
 	resolved, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -811,7 +822,7 @@ func walkOneDenyRoot(root string, globs []string, protected map[string]bool, rea
 		if rc != nil {
 			rc.readdirs.Add(1)
 		}
-		entries, _ := os.ReadDir(dir) // unreadable folder: skip, don't abort the walk
+		entries, err := readDir(dir) // unreadable folder: skip, don't abort the walk
 		for _, d := range entries {
 			if count.Add(1) > limit {
 				return subdirs, found, true
@@ -836,7 +847,17 @@ func walkOneDenyRoot(root string, globs []string, protected map[string]bool, rea
 				subdirs = append(subdirs, path)
 			}
 		}
-		if rc != nil && haveFP && (isDir || len(entries) == 0) {
+		// A failed read of a directory is never recorded: entries would
+		// be nil, and caching that state under the current fingerprint
+		// would hide the whole subtree from later passes while the
+		// fingerprint stays stable. The stale entry (if any) keeps its
+		// old fingerprint, which no longer matches, so the next pass
+		// re-reads the directory like the uncached walk does. A failed
+		// read of a non-directory is different: it is the expected
+		// ENOTDIR of a granted file root and records the empty state
+		// that retires it, as before.
+		readFailed := isDir && err != nil
+		if rc != nil && haveFP && !readFailed && (isDir || len(entries) == 0) {
 			// A non-directory with entries means a dir was replaced by a
 			// symlink: os.ReadDir follows it, but caching that state would
 			// charge the cap differently than the uncached walk, which

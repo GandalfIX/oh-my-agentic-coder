@@ -209,3 +209,59 @@ func TestDenyScanCacheChargesCapAcrossPasses(t *testing.T) {
 		t.Fatal("incremental pass must report the cap after the tree outgrew it")
 	}
 }
+
+// TestDenyScanCacheSurvivesTransientReadError injects a failed readdir
+// into one changed directory. The failed read must not be cached: its
+// entries would be nil, and with that state cached under the current
+// fingerprint, the directory below it would be invisible to every later
+// pass while nothing on disk changes — a new match there would never be
+// detected. Instead the stale entry keeps its old fingerprint, so the
+// next pass re-reads the directory and finds the match.
+func TestDenyScanCacheSurvivesTransientReadError(t *testing.T) {
+	root := cacheTree(t)
+	// The walk resolves the root with EvalSymlinks and works on the
+	// resolved spelling (on macOS /var/... becomes /private/var/...);
+	// resolve up front so the hook below matches the paths it sees.
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	cache := newDenyScanCache()
+	if got := cacheWalk(t, root, cache); len(got) != 1 {
+		t.Fatalf("first pass got %v", got)
+	}
+
+	// A new subtree inside sub1/deep. This changes sub1/deep's
+	// fingerprint, so the next pass re-reads it — and that read fails.
+	deep := filepath.Join(root, "sub1", "deep")
+	if err := os.Mkdir(filepath.Join(deep, "kid"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(deep, "kid", ".env"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	hook := func(dir string) ([]os.DirEntry, error) {
+		if dir == deep {
+			return nil, fmt.Errorf("injected read failure")
+		}
+		return os.ReadDir(dir)
+	}
+	readDirHook.Store(&hook)
+	if got := cacheWalk(t, root, cache); len(got) != 0 {
+		readDirHook.Store(nil)
+		t.Fatalf("failing pass reported %v", got)
+	}
+	readDirHook.Store(nil)
+
+	// The failing pass must have left the cached state untouched, so
+	// this pass re-reads sub1/deep and reports all its matches,
+	// including the new one.
+	got := cacheWalk(t, root, cache)
+	want := []string{
+		filepath.Join(deep, ".env"),
+		filepath.Join(deep, "kid", ".env"),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("pass after the transient failure got %v, want %v", got, want)
+	}
+}

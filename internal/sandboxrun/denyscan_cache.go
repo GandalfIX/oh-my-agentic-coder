@@ -11,6 +11,12 @@ import (
 // mtime proves the entry set is unchanged. ctime also catches changes
 // that leave mtime alone, such as a chmod that makes a previously
 // unreadable folder readable.
+//
+// This assumes filesystems with fine-grained timestamps (APFS, ext4).
+// On coarse-grained ones (FAT/exFAT, some network mounts) a change
+// landing in the same timestamp tick as the previous read can go
+// unnoticed; the sandbox backends only run on local filesystems, where
+// this is not a concern.
 type dirFingerprint struct {
 	mtimeSec, mtimeNsec int64
 	ctimeSec, ctimeNsec int64

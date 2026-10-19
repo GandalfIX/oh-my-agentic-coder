@@ -213,11 +213,18 @@ func exists(p string) bool {
 	return err == nil
 }
 
-// symlinkMountDests returns the destinations in a bwrap argv that are
-// symlinks on the host inside an earlier grant bind. There the sandbox
-// shows them as symlinks, and bwrap >= 0.12 refuses to mount onto them.
+// symlinkMountDests returns the destinations in a bwrap argv that the
+// sandbox shows as symlinks: host symlinks strictly inside an earlier grant
+// bind, so that the grant exposes the link itself. bwrap >= 0.12 refuses to
+// mount onto them. A destination bound by its own exact grant is not one:
+// bwrap follows the source link and creates a plain file or folder there,
+// e.g. a granted and protected ~/.netrc -> dotfiles/netrc.
 func symlinkMountDests(argv []string) []string {
-	var bound []*mount
+	type bind struct {
+		path  string
+		grant bool // shows host content (src == dest), unlike masks and tmpfs
+	}
+	var earlier []bind
 	var out []string
 	for i := 0; i < len(argv) && argv[i] != "--"; i++ {
 		var src, dest string
@@ -231,13 +238,20 @@ func symlinkMountDests(argv []string) []string {
 		default:
 			continue
 		}
-		if fi, err := os.Lstat(dest); err == nil && fi.Mode()&os.ModeSymlink != 0 &&
-			(coveredByAny(dest, bound) || (len(bound) > 0 && bound[0].path == "/")) {
-			out = append(out, dest)
+		// The deepest earlier mount decides what is at dest; on a tie the
+		// later one, as it is mounted on top.
+		var top *bind
+		for j := range earlier {
+			if isUnder(dest, earlier[j].path) && (top == nil || len(earlier[j].path) >= len(top.path)) {
+				top = &earlier[j]
+			}
 		}
-		if src == dest { // a grant; masks and tmpfs show no host content
-			bound = append(bound, &mount{path: dest})
+		if top != nil && top.grant && top.path != dest {
+			if fi, err := os.Lstat(dest); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				out = append(out, dest)
+			}
 		}
+		earlier = append(earlier, bind{path: dest, grant: src == dest})
 	}
 	return out
 }
@@ -245,36 +259,88 @@ func symlinkMountDests(argv []string) []string {
 // redundantLinkMount reports whether m is a symlink inside another mount
 // whose target the sandbox already shows with the same access as m.
 func redundantLinkMount(m *mount, mounts []*mount) bool {
-	if innermostMount(filepath.Dir(m.path), mounts) == nil {
+	others := make([]*mount, 0, len(mounts))
+	for _, o := range mounts {
+		if o != m {
+			others = append(others, o)
+		}
+	}
+	if innermostMount(filepath.Dir(m.path), others) == nil {
 		return false // not nested: bwrap creates a fresh dir and binds there
 	}
-	target := sandboxLinkTarget(m.path)
-	if target == m.path || !sameRealPath(target, m.path) {
+	target, ok := sandboxResolve(m.path, others)
+	if !ok || target == m.path || !sameRealPath(target, m.path) {
 		return false
 	}
-	c := innermostMount(target, mounts)
+	c := innermostMount(target, others)
 	return c != nil && c.rw == m.rw
 }
 
-// sandboxLinkTarget follows the symlink at p, if any, keeping the spelling
-// the sandbox sees. Mounts keep their host path there, so a relative target
-// is joined to the link's own spelling rather than resolved to the host's
-// real path: under a grant on the symlinked dir /alias -> /real,
-// /alias/lib64 -> lib points at /alias/lib. The join is textual, so ".."
-// can disagree with the kernel; callers confirm the result with
-// sameRealPath. Returns p when it is not a symlink.
-func sandboxLinkTarget(p string) string {
-	for range maxSymlinkHops {
-		target, err := os.Readlink(p)
+// sandboxResolve follows the symlinks in p the way the kernel would inside
+// the sandbox, where only the mounts show host content. Each component is
+// looked up there: inside a mount it is what the host has, a mount point
+// itself is a plain file or folder (bwrap follows the bind source), and a
+// folder above a mount is one bwrap created. Anything else does not exist,
+// so a chain such as /work/link -> /outside/next -> /work/data under a
+// grant on /work alone fails here although the host resolves it. Returns
+// the resolved path, spelled as the sandbox sees it, and whether it exists.
+func sandboxResolve(p string, mounts []*mount) (string, bool) {
+	cur := "/"
+	rest := strings.Split(filepath.Clean(p), "/")
+	for hops := 0; len(rest) > 0; {
+		name := rest[0]
+		rest = rest[1:]
+		switch name {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur) // cur holds no symlink, so ".." is textual
+			continue
+		}
+		next := filepath.Join(cur, name)
+		in := innermostMount(next, mounts)
+		if in == nil {
+			if !aboveAnyMount(next, mounts) {
+				return "", false
+			}
+			cur = next
+			continue
+		}
+		if in.path == next {
+			cur = next
+			continue
+		}
+		fi, err := os.Lstat(next)
 		if err != nil {
-			break
+			return "", false
 		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(p), target)
+		if fi.Mode()&os.ModeSymlink == 0 {
+			cur = next
+			continue
 		}
-		p = filepath.Clean(target)
+		if hops++; hops > maxSymlinkHops {
+			return "", false
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", false
+		}
+		if filepath.IsAbs(target) {
+			cur = "/"
+		}
+		rest = append(strings.Split(target, "/"), rest...)
 	}
-	return p
+	return cur, true
+}
+
+// aboveAnyMount reports whether path is a strict ancestor of some mount.
+func aboveAnyMount(path string, mounts []*mount) bool {
+	for _, m := range mounts {
+		if m.path != path && isUnder(m.path, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // sameRealPath reports whether a and b resolve to the same host path.
@@ -297,7 +363,7 @@ func innermostMount(path string, mounts []*mount) *mount {
 
 // isUnder reports whether path equals root or lies below it.
 func isUnder(path, root string) bool {
-	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+	return path == root || root == "/" || strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 // coveredByAny reports whether path lies under (or equals) any mount.

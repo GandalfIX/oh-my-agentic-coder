@@ -246,6 +246,31 @@ func TestIntegrationSymlinkDestinationError(t *testing.T) {
 	}
 }
 
+// A protected symlink granted on its own (e.g. ~/.netrc -> dotfiles/netrc)
+// is not a mount onto a symlink: bwrap creates a plain file for the grant,
+// and the mask goes on top of that. It must start on every bwrap and stay
+// masked.
+func TestIntegrationStandaloneProtectedSymlinkGrant(t *testing.T) {
+	requireBwrap(t)
+	g := linuxTestGrants(t)
+	g.NetworkMode = sandboxprofile.ModeOpen // no Landlock needed for this check
+	dotfiles := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dotfiles, "netrc"), []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	netrc := filepath.Join(t.TempDir(), ".netrc")
+	symlinkAt(t, filepath.Join(dotfiles, "netrc"), netrc)
+	g.ReadPaths = append(g.ReadPaths, netrc)
+	g.ProtectedPaths = append(g.ProtectedPaths, netrc)
+	if _, err := BuildChildArgv(g, []string{"true"}); err != nil {
+		t.Fatalf("standalone protected symlink grant refused: %v", err)
+	}
+	out, _ := runBwrapped(t, g, "cat", netrc)
+	if strings.Contains(out, "symlink destination") || strings.Contains(out, "SECRET") {
+		t.Errorf("want a sandbox that starts with the secret masked, got: %s", out)
+	}
+}
+
 // TestIntegrationProtectedMarkerLaunchAndContent guards the regression
 // where the marker bind sources were deleted before bwrap exec: with
 // DenialText set and a protected path present, the sandbox must still

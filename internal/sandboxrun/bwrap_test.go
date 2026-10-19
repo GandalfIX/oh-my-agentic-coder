@@ -318,6 +318,85 @@ func TestSymlinkMountDests(t *testing.T) {
 	}
 }
 
+// The sandbox resolves a link with only the mounts in view. When a hop of
+// the chain, or a symlinked folder on the way, sits outside every mount,
+// the link is broken in the sandbox even though the host resolves it into
+// a grant, so the bind must stay.
+func TestBwrapNestedSymlinkGrantKeptWhenChainLeavesSandbox(t *testing.T) {
+	wd, outside := t.TempDir(), t.TempDir()
+	data := filepath.Join(wd, "data")
+	if err := os.Mkdir(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Intermediate link: wd/hop -> outside/next -> wd/data.
+	hop := filepath.Join(wd, "hop")
+	symlinkAt(t, filepath.Join(outside, "next"), hop)
+	symlinkAt(t, data, filepath.Join(outside, "next"))
+	// Symlinked folder on the way: wd/via -> out/data, wd/out -> outside/up -> wd.
+	via := filepath.Join(wd, "via")
+	symlinkAt(t, "out/data", via)
+	symlinkAt(t, filepath.Join(outside, "up"), filepath.Join(wd, "out"))
+	symlinkAt(t, wd, filepath.Join(outside, "up"))
+
+	for _, link := range []string{hop, via} {
+		g := &Grants{Workdir: wd, AllowPaths: []string{wd, link}}
+		argv, err := BuildBwrapArgv(g, []string{"x"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if joined := strings.Join(argv, " "); !strings.Contains(joined, "--bind "+link+" "+link) {
+			t.Errorf("%s: grant must stay, the chain leaves the sandbox: %s", link, joined)
+		}
+	}
+}
+
+// A chain that stays inside the mounts is still dropped, including through
+// a granted folder that is itself a symlink on the host (bwrap shows the
+// grant as a plain folder at the link's name).
+func TestBwrapNestedSymlinkGrantDroppedThroughVisibleChain(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(filepath.Join(real, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	symlinkAt(t, real, alias)
+	symlinkAt(t, "lib32", filepath.Join(real, "lib64"))
+	symlinkAt(t, "../alias/lib", filepath.Join(real, "lib32"))
+	link := filepath.Join(alias, "lib64")
+	g := &Grants{Workdir: "/", ReadPaths: []string{alias, link}}
+	argv, err := BuildBwrapArgv(g, []string{"x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(argv, " "); strings.Contains(joined, link) {
+		t.Errorf("chain is visible in the sandbox, bind must be dropped: %s", joined)
+	}
+}
+
+// A granted symlink that no other grant covers is bound onto a fresh path,
+// where bwrap creates a plain file. A mask on that same path is therefore
+// not a mount onto a symlink and must not be reported.
+func TestSymlinkMountDestsStandaloneGrant(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "netrc"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	netrc := filepath.Join(home, ".netrc")
+	symlinkAt(t, "netrc", netrc)
+	g := &Grants{Workdir: "/", ReadPaths: []string{netrc}, ProtectedPaths: []string{netrc}}
+	argv, err := BuildBwrapArgv(g, []string{"x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(argv, " "), "--ro-bind /dev/null "+netrc) {
+		t.Fatalf("protected symlink must be masked: %v", argv)
+	}
+	if got := symlinkMountDests(argv); len(got) != 0 {
+		t.Errorf("mask over a standalone grant reported as a symlink mount: %v", got)
+	}
+}
+
 func TestStage2ArgsFiltered(t *testing.T) {
 	got := Stage2Args(bwrapGrants())
 	want := []string{

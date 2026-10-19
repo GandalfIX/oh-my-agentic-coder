@@ -24,6 +24,16 @@ import (
 // deliberate: a masked path keeps its mask even when the underlying
 // file is recreated (the bind mount shadows the path, not the inode),
 // and an already-alerted path must not re-alert on every tick.
+//
+// The walk carries a denyScanCache across ticks: the snapshot seeds it
+// and every tick re-walks incrementally, re-reading only directories
+// whose fingerprint changed since the previous pass. A tick's result
+// lists only matches from re-read directories — every match of an
+// unchanged directory was reported by an earlier pass, so new-match
+// detection is unchanged — while an idle pass costs one lstat per
+// directory instead of re-opening and re-reading the whole grant,
+// which on macOS's Seatbelt-backed home paths burned multiple cores
+// for as long as the session sat idle.
 func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.Duration, onNew func(path string), stop <-chan struct{}) error {
 	base := sandboxprofile.PlatformBaseline()
 	roots, err := denyScanRoots(p, workdir)
@@ -31,8 +41,9 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 		return err
 	}
 	protected := sandboxprofile.EffectiveProtectedPaths(base, p.Filesystem.OverrideDeny)
+	cache := newDenyScanCache()
 	resolve := func() ([]string, error) {
-		out, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil)
+		out, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, cache)
 		if err == nil && len(byName.roots) > 0 {
 			// The folder grew past the cap during the session. The profile
 			// has no name rule for it, so stop as an incomplete scan does.
@@ -42,7 +53,7 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 	}
 
 	known := map[string]bool{}
-	initial, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil)
+	initial, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, cache)
 	if err != nil {
 		return err
 	}

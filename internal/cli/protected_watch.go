@@ -17,8 +17,9 @@ import (
 // deny-scan roots looking for files a protected pattern matched only
 // after launch. Detection latency equals this interval; a file that
 // appears and disappears within one interval is never detected. Each
-// tick is a full re-walk; switch to fsnotify if the I/O cost ever
-// matters.
+// tick re-walks incrementally: a denyScanCache carries every
+// directory's fingerprint between ticks, so unchanged directories cost
+// one lstat and only changed ones are re-read.
 const midsessionProtectedWatchInterval = 10 * time.Second
 
 // protectedWatch records what the mid-session protected-file watch

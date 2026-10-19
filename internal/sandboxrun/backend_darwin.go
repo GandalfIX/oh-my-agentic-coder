@@ -47,6 +47,13 @@ func BuildChildArgv(g *Grants, innerArgv []string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve sandbox home directory: %w", err)
 	}
+	info, err := os.Stat(home)
+	if err != nil {
+		return nil, fmt.Errorf("stat sandbox home directory: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("sandbox home %q is not a directory", home)
+	}
 	gz.HomeDir = home
 	gz.ReadPaths = append(append([]string{}, g.ReadPaths...), resolveInnerBinaryDirs(innerArgv)...)
 	profile := GenerateSBPL(&gz)

@@ -6,25 +6,31 @@ import (
 )
 
 // dirFingerprint identifies a directory's metadata state: the (sec,
-// nsec) pairs of its mtime and ctime. mtime changes whenever the entry
-// set changes (create, unlink, rename all update it), so an unchanged
-// mtime proves the entry set is unchanged. ctime also catches changes
-// that leave mtime alone, such as a chmod that makes a previously
-// unreadable folder readable.
+// nsec) pairs of its mtime and ctime plus the inode and device from the
+// raw stat. mtime changes whenever the entry set changes (create,
+// unlink, rename all update it), so an unchanged mtime proves the entry
+// set is unchanged. ctime also catches changes that leave mtime alone,
+// such as a chmod that makes a previously unreadable folder readable —
+// and it cannot be set from user space, so backdating mtime with
+// utimensat still invalidates the fingerprint. ino and dev catch the
+// directory being replaced wholesale.
 //
-// This assumes filesystems with fine-grained timestamps (APFS, ext4).
-// On coarse-grained ones (FAT/exFAT, some network mounts) a change
-// landing in the same timestamp tick as the previous read can go
-// unnoticed; the sandbox backends only run on local filesystems, where
-// this is not a concern.
+// Limitation: directory timestamps come from the filesystem's coarse
+// clock (whole seconds on HFS+, a few milliseconds on ext4, coarser
+// still on FAT/exFAT and network mounts), so a change landing in the
+// same tick as the previous read can leave every field unchanged. The
+// mid-session watch bounds this: every few ticks it runs one full
+// uncached pass that re-reads everything (see WatchNewProtected).
 type dirFingerprint struct {
 	mtimeSec, mtimeNsec int64
 	ctimeSec, ctimeNsec int64
+	ino, dev            int64
 }
 
 func (f dirFingerprint) equal(o dirFingerprint) bool {
 	return f.mtimeSec == o.mtimeSec && f.mtimeNsec == o.mtimeNsec &&
-		f.ctimeSec == o.ctimeSec && f.ctimeNsec == o.ctimeNsec
+		f.ctimeSec == o.ctimeSec && f.ctimeNsec == o.ctimeNsec &&
+		f.ino == o.ino && f.dev == o.dev
 }
 
 // denyScanCache remembers what the last walk of each scan root saw in
@@ -49,8 +55,15 @@ func (f dirFingerprint) equal(o dirFingerprint) bool {
 //
 // State is kept per scan root (the granted spelling), because two
 // granted roots may overlap and each root's walk must count its own
-// entries toward the shared scan cap. All methods are safe for the
-// walk's concurrent per-root workers.
+// entries toward the scan cap. All methods are safe for the walk's
+// concurrent per-root workers.
+//
+// Detection bound: a directory change that lands in the same
+// coarse-clock tick as the previous read can share its timestamps (see
+// dirFingerprint), so a pass between full re-reads can miss it. The
+// watch therefore interleaves full uncached passes, which bounds the
+// worst-case detection latency at the full-pass interval instead of the
+// tick interval.
 type denyScanCache struct {
 	mu    sync.Mutex
 	roots map[string]*denyScanRootState

@@ -108,6 +108,19 @@ What happens then depends on the system:
   (the rule would hide it too), or a `filesystem.deny` pattern uses `[...]`
   or `\` (for example `*.[pk]em`).
 
+  **During the session:** the masking above is fixed at launch — a `.env`
+  file created later is *not* masked, because the sandbox rules cannot be
+  changed while the session runs. The omac parent therefore re-scans the
+  same roots every 10 seconds and warns you when a new protected file
+  appears; the warning tells you that only a restart restores protection.
+  The watch warns, it does not block or mask. Directory timestamps come
+  from the filesystem's coarse clock, so a file created within a few
+  milliseconds of a scan (a full second on HFS+) can share the previous
+  scan's timestamp and slip past an incremental scan; a full rescan every
+  minute bounds this, so a mid-session `.env` file is detected within a
+  minute at worst and usually within 10 seconds. A file that appears and
+  disappears between two scans is never detected.
+
 On macOS, keychain files are also blocked: the keychain folders
 (`~/Library/Keychains`, `/Library/Keychains`) and any file named
 `*.keychain` or `*.keychain-db` anywhere, for example a CI signing keychain

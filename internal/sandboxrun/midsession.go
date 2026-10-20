@@ -8,6 +8,13 @@ import (
 	"github.com/TNG/oh-my-agentic-coder/internal/sandboxprofile"
 )
 
+// midsessionFullPassTicks is how many incremental watch ticks run
+// before one full uncached pass interleaves (see WatchNewProtected).
+// With the default 10 s watch interval this bounds the worst-case
+// detection latency of the mid-session protected-file watch at one
+// minute; see denyScanCache for why a bound is needed at all.
+const midsessionFullPassTicks = 6
+
 // WatchNewProtected polls the deny-scan roots for files that match a
 // protected pattern but were created after the initial snapshot,
 // calling onNew for each. It blocks until stop is closed; the caller
@@ -27,13 +34,18 @@ import (
 //
 // The walk carries a denyScanCache across ticks: the snapshot seeds it
 // and every tick re-walks incrementally, re-reading only directories
-// whose fingerprint changed since the previous pass. A tick's result
-// lists only matches from re-read directories — every match of an
-// unchanged directory was reported by an earlier pass, so new-match
-// detection is unchanged — while an idle pass costs one lstat per
-// directory instead of re-opening and re-reading the whole grant,
-// which on macOS's Seatbelt-backed home paths burned multiple cores
-// for as long as the session sat idle.
+// whose fingerprint changed since the previous pass, while every
+// midsessionFullPassTicks-th tick runs one full uncached pass. A tick's
+// result lists only matches from re-read directories — every match of
+// an unchanged directory was reported by an earlier pass, so new-match
+// detection is unchanged — and an idle pass costs one lstat per
+// directory instead of re-opening and re-reading the whole grant, which
+// on macOS's Seatbelt-backed home paths burned multiple cores for as
+// long as the session sat idle. The interleaved full passes bound the
+// worst-case detection latency at the full-pass interval: directory
+// timestamps come from the filesystem's coarse clock, so a change can
+// share the previous read's timestamps and slip past the incremental
+// passes (see denyScanCache).
 func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.Duration, onNew func(path string), stop <-chan struct{}) error {
 	base := sandboxprofile.PlatformBaseline()
 	roots, err := denyScanRoots(p, workdir)
@@ -42,8 +54,8 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 	}
 	protected := sandboxprofile.EffectiveProtectedPaths(base, p.Filesystem.OverrideDeny)
 	cache := newDenyScanCache()
-	resolve := func() ([]string, error) {
-		out, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, cache)
+	resolve := func(scanCache *denyScanCache) ([]string, error) {
+		out, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, scanCache)
 		if err == nil && len(byName.roots) > 0 {
 			// The folder grew past the cap during the session. The profile
 			// has no name rule for it, so stop as an incomplete scan does.
@@ -67,12 +79,24 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	ticks := 0
 	for {
 		select {
 		case <-stop:
 			return nil
 		case <-ticker.C:
-			current, err := resolve()
+			ticks++
+			// A full uncached pass re-reads every directory, catching
+			// changes that shared the previous read's coarse-clock
+			// timestamps and slipped past the incremental passes. It
+			// leaves the cache untouched; the next incremental pass
+			// re-reads the directories that changed since it was last
+			// seeded, which is redundant but never wrong.
+			scanCache := cache
+			if ticks%midsessionFullPassTicks == 0 {
+				scanCache = nil
+			}
+			current, err := resolve(scanCache)
 			if err != nil {
 				return err
 			}

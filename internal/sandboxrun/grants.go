@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/TNG/oh-my-agentic-coder/internal/sandboxdeny"
 	"github.com/TNG/oh-my-agentic-coder/internal/sandboxprofile"
@@ -733,12 +734,8 @@ func walkGlobMatches(roots, globs, protectedDirs []string, cache *denyScanCache)
 // whose basename is in denyScanSkipDirNames is pruned too (layer 2), but
 // only when it is not itself a glob match — a matched dir is masked.
 //
-// A non-nil cache makes the walk incremental: each directory is lstat'd
-// first, and one whose fingerprint (mtime+ctime) is unchanged since the
-// previous pass is not re-read — its cached subdirectory list keeps the
-// traversal going, its entry count still charges the cap, and it cannot
-// contribute new matches. A granted file used as a scan root is skipped
-// the same way (it never yields entries). See denyScanCache.
+// A non-nil cache makes the walk incremental: what is skipped, what a
+// pass returns and how the cap is charged is the denyScanCache contract.
 //
 // When root is itself a symlink, the kernel backends resolve it and mount
 // the real tree, but filepath.WalkDir lstat's the root and so would not
@@ -758,17 +755,6 @@ func walkGlobMatches(roots, globs, protectedDirs []string, cache *denyScanCache)
 // still not followed: a folder listing reports a link as a link, and any
 // real-tree location the agent can reach belongs to some granted root
 // whose own scan emits its spelling.
-// readDirHook, when non-nil, replaces os.ReadDir in the deny-scan walk.
-// Tests use it to inject transient read failures.
-var readDirHook atomic.Pointer[func(string) ([]os.DirEntry, error)]
-
-func readDir(dir string) ([]os.DirEntry, error) {
-	if f := readDirHook.Load(); f != nil {
-		return (*f)(dir)
-	}
-	return os.ReadDir(dir)
-}
-
 func walkOneDenyRoot(root string, globs []string, protected map[string]bool, readDirs chan struct{}, cache *denyScanCache) (matches []string, hitCap bool) {
 	resolved, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -847,22 +833,19 @@ func walkOneDenyRoot(root string, globs []string, protected map[string]bool, rea
 				subdirs = append(subdirs, path)
 			}
 		}
-		// A failed read of a directory is never recorded: entries would
-		// be nil, and caching that state under the current fingerprint
-		// would hide the whole subtree from later passes while the
-		// fingerprint stays stable. The stale entry (if any) keeps its
-		// old fingerprint, which no longer matches, so the next pass
-		// re-reads the directory like the uncached walk does. A failed
-		// read of a non-directory is different: it is the expected
-		// ENOTDIR of a granted file root and records the empty state
-		// that retires it, as before.
-		readFailed := isDir && err != nil
-		if rc != nil && haveFP && !readFailed && (isDir || len(entries) == 0) {
-			// A non-directory with entries means a dir was replaced by a
-			// symlink: os.ReadDir follows it, but caching that state would
-			// charge the cap differently than the uncached walk, which
-			// re-reads (and re-counts) it every pass. Leave it uncached.
-			rc.record(dir, fp, isDir, int64(len(entries)), subdirs)
+		// A failed read of a directory is never recorded: caching the
+		// empty state under the current fingerprint would hide the whole
+		// subtree from later passes, while the stale entry's old
+		// fingerprint no longer matches and the next pass re-reads — like
+		// the uncached walk. A granted file root's failed read is the
+		// expected ENOTDIR and records the empty state that retires it.
+		if rc != nil && haveFP {
+			switch {
+			case isDir && err == nil:
+				rc.record(dir, fp, true, int64(len(entries)), subdirs)
+			case !isDir && dir == resolved && errors.Is(err, syscall.ENOTDIR):
+				rc.record(dir, fp, false, 0, nil)
+			}
 		}
 		return subdirs, found, false
 	}
@@ -905,6 +888,17 @@ func walkOneDenyRoot(root string, globs []string, protected map[string]bool, rea
 	}
 	wg.Wait()
 	return matches, hitCap
+}
+
+// readDirHook, when non-nil, replaces os.ReadDir in the deny-scan walk.
+// Tests use it to inject transient read failures.
+var readDirHook atomic.Pointer[func(string) ([]os.DirEntry, error)]
+
+func readDir(dir string) ([]os.DirEntry, error) {
+	if f := readDirHook.Load(); f != nil {
+		return (*f)(dir)
+	}
+	return os.ReadDir(dir)
 }
 
 func dedupe(in []string) []string {

@@ -5,8 +5,27 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
 )
+
+// bumpOffset makes successive bumps distinct even on filesystems whose
+// coarse clock would give two bumps within the same second the same
+// mtime, which would let the walk skip the directory again.
+var bumpOffset atomic.Int64
+
+// bump sets dir's mtime to a value well apart from any previous read's,
+// so the next pass re-reads it even where the filesystem clock is coarse
+// and the mutation would otherwise share the cached timestamp (HFS+
+// ticks in whole seconds, ext4's clock is a few milliseconds coarse).
+func bump(t *testing.T, dir string) {
+	t.Helper()
+	ts := time.Now().Add(time.Duration(bumpOffset.Add(1)) * time.Hour)
+	if err := os.Chtimes(dir, ts, ts); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // cacheTree builds a fixed shape the tests below reason about:
 // root/{sub1,sub2}/{deep,a}/file and root/sub1/deep/.env. Four
@@ -101,6 +120,7 @@ func TestDenyScanCacheFindsNewMatchOnlyInChangedDirs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "sub1", "newdir", ".env"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	bump(t, filepath.Join(root, "sub1"))
 
 	got := cacheWalk(t, root, cache)
 	want := filepath.Join(root, "sub1", "newdir", ".env")
@@ -126,6 +146,7 @@ func TestDenyScanCacheReconcilesRemovedDirs(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(root, "sub1")); err != nil {
 		t.Fatal(err)
 	}
+	bump(t, root)
 	if got := cacheWalk(t, root, cache); len(got) != 0 {
 		t.Fatalf("pass after removal reported %v", got)
 	}
@@ -136,6 +157,7 @@ func TestDenyScanCacheReconcilesRemovedDirs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "sub1", "deep", ".env"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	bump(t, root)
 	got := cacheWalk(t, root, cache)
 	want := filepath.Join(root, "sub1", "deep", ".env")
 	if len(got) != 1 || got[0] != want {
@@ -205,6 +227,7 @@ func TestDenyScanCacheChargesCapAcrossPasses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	bump(t, big)
 	if _, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, denyScanConcurrency), cache); !hitCap {
 		t.Fatal("incremental pass must report the cap after the tree outgrew it")
 	}
@@ -218,13 +241,7 @@ func TestDenyScanCacheChargesCapAcrossPasses(t *testing.T) {
 // detected. Instead the stale entry keeps its old fingerprint, so the
 // next pass re-reads the directory and finds the match.
 func TestDenyScanCacheSurvivesTransientReadError(t *testing.T) {
-	root := cacheTree(t)
-	// The walk resolves the root with EvalSymlinks and works on the
-	// resolved spelling (on macOS /var/... becomes /private/var/...);
-	// resolve up front so the hook below matches the paths it sees.
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
+	root := resolvePath(t, cacheTree(t))
 	cache := newDenyScanCache()
 	if got := cacheWalk(t, root, cache); len(got) != 1 {
 		t.Fatalf("first pass got %v", got)
@@ -239,6 +256,7 @@ func TestDenyScanCacheSurvivesTransientReadError(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(deep, "kid", ".env"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	bump(t, deep)
 
 	hook := func(dir string) ([]os.DirEntry, error) {
 		if dir == deep {
@@ -247,8 +265,8 @@ func TestDenyScanCacheSurvivesTransientReadError(t *testing.T) {
 		return os.ReadDir(dir)
 	}
 	readDirHook.Store(&hook)
+	t.Cleanup(func() { readDirHook.Store(nil) })
 	if got := cacheWalk(t, root, cache); len(got) != 0 {
-		readDirHook.Store(nil)
 		t.Fatalf("failing pass reported %v", got)
 	}
 	readDirHook.Store(nil)
@@ -263,5 +281,80 @@ func TestDenyScanCacheSurvivesTransientReadError(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("pass after the transient failure got %v, want %v", got, want)
+	}
+}
+
+// resolvePath resolves dir with EvalSymlinks: the walk works on the
+// resolved spelling (on macOS /var/... becomes /private/var/...), and
+// the tests below need the cache keys and the match spellings to match
+// that.
+func resolvePath(t *testing.T, dir string) string {
+	t.Helper()
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		return resolved
+	}
+	return dir
+}
+
+// TestDenyScanCacheDetectsBackdatedMtime covers the ctime half of the
+// fingerprint: an agent can set a directory's mtime back to the cached
+// value with utimensat (os.Chtimes here), but cannot set ctime — the
+// Chtimes call itself updates it — so the pass must still re-read and
+// find the match an mtime-only fingerprint would hide.
+func TestDenyScanCacheDetectsBackdatedMtime(t *testing.T) {
+	root := resolvePath(t, cacheTree(t))
+	cache := newDenyScanCache()
+	if got := cacheWalk(t, root, cache); len(got) != 1 {
+		t.Fatalf("first pass got %v", got)
+	}
+
+	sub1 := filepath.Join(root, "sub1")
+	cached := cache.state(root).dirs[sub1]
+	if cached == nil {
+		t.Fatal("sub1 was not cached")
+	}
+	if err := os.WriteFile(filepath.Join(sub1, ".env"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate sub1's mtime to the fingerprint the first pass cached.
+	old := time.Unix(cached.fp.mtimeSec, cached.fp.mtimeNsec)
+	if err := os.Chtimes(sub1, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	got := cacheWalk(t, root, cache)
+	want := filepath.Join(sub1, ".env")
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("pass after backdating got %v, want [%s]", got, want)
+	}
+}
+
+// TestDenyScanCacheDetectsChmodReveal covers the documented ctime use:
+// a chmod leaves mtime alone, so an mtime-only fingerprint would serve
+// the stale cached state of a folder whose readability changed.
+func TestDenyScanCacheDetectsChmodReveal(t *testing.T) {
+	root := resolvePath(t, cacheTree(t))
+	deep := filepath.Join(root, "sub1", "deep")
+	cache := newDenyScanCache()
+	if got := cacheWalk(t, root, cache); len(got) != 1 {
+		t.Fatalf("first pass got %v", got)
+	}
+	readsAfterFirst := cache.state(root).readdirs.Load()
+
+	// Two chmods: ctime changes, mtime does not.
+	if err := os.Chmod(deep, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := cacheWalk(t, root, cache)
+	want := filepath.Join(deep, ".env")
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("pass after chmod got %v, want [%s]", got, want)
+	}
+	if reads := cache.state(root).readdirs.Load(); reads-readsAfterFirst != 1 {
+		t.Errorf("pass after chmod re-read %d directories, want 1", reads-readsAfterFirst)
 	}
 }

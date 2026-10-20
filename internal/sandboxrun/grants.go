@@ -228,7 +228,7 @@ func ResolveGrants(p *sandboxprofile.Profile, workdir string, notices io.Writer)
 	// basenames are matched together in one pass.
 	denyResolved, byName, err := resolveDenyPaths(
 		p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny,
-		dedupe(denyScan), protected, notices, nil,
+		dedupe(denyScan), protected, notices, nil, denyScanConcurrency,
 	)
 	if err != nil {
 		return nil, err
@@ -520,7 +520,10 @@ func denyScanRoots(p *sandboxprofile.Profile, workdir string) ([]string, error) 
 // pass — every match of an unchanged directory was reported by an earlier
 // pass, which is what the mid-session watch's new-match detection needs.
 // Launch passes nil and gets the complete set, as before.
-func resolveDenyPaths(userDeny, baselineBasenames, overrideDeny, scanRoots, protectedDirs []string, notices io.Writer, cache *denyScanCache) (out []string, byName nameDeny, err error) {
+//
+// concurrency bounds how many folders the walk reads in parallel; launch
+// passes denyScanConcurrency, the watch's throttled full pass passes less.
+func resolveDenyPaths(userDeny, baselineBasenames, overrideDeny, scanRoots, protectedDirs []string, notices io.Writer, cache *denyScanCache, concurrency int) (out []string, byName nameDeny, err error) {
 	if len(userDeny) == 0 && len(baselineBasenames) == 0 {
 		return nil, nameDeny{}, nil
 	}
@@ -543,7 +546,7 @@ func resolveDenyPaths(userDeny, baselineBasenames, overrideDeny, scanRoots, prot
 
 	out = explicit
 	if len(globs) > 0 {
-		matches, incomplete := walkGlobMatches(scanRoots, globs, protectedDirs, cache)
+		matches, incomplete := walkGlobMatches(scanRoots, globs, protectedDirs, cache, concurrency)
 		for _, root := range incomplete {
 			if ok, reason := canDenyByName(root, globs, overrideDeny); !ok {
 				return nil, nameDeny{}, fmt.Errorf("sandbox grants: filesystem.deny scan of %s hit the %d-entry limit; refusing to launch with an incomplete protected set%s", root, denyScanLimit.Load(), reason)
@@ -664,7 +667,7 @@ func clampInt(v, lo, hi int) int {
 // name matches one of the globs. Each root walk is bounded by
 // maxDenyScanEntries and never descends into a matched directory
 // (masking the dir is enough). Roots and the folders inside them are read
-// concurrently (bounded by denyScanConcurrency); the result set is
+// concurrently (bounded by the concurrency argument); the result set is
 // order-independent — callers dedupe+sort — so concurrency doesn't
 // affect the resolved grants.
 //
@@ -682,7 +685,7 @@ func clampInt(v, lo, hi int) int {
 // protectedDirs are already-denied paths the walk prunes without
 // descending (any match inside is masked by the ancestor rule), and
 // denyScanSkipDirNames prunes large dependency/cache trees.
-func walkGlobMatches(roots, globs, protectedDirs []string, cache *denyScanCache) (matches, incomplete []string) {
+func walkGlobMatches(roots, globs, protectedDirs []string, cache *denyScanCache, concurrency int) (matches, incomplete []string) {
 	if len(globs) == 0 || len(roots) == 0 {
 		return nil, nil
 	}
@@ -697,14 +700,14 @@ func walkGlobMatches(roots, globs, protectedDirs []string, cache *denyScanCache)
 		hitCap  bool
 	}
 	results := make([]rootResult, len(roots))
-	readDirs := make(chan struct{}, denyScanConcurrency)
+	readDirs := make(chan struct{}, clampInt(concurrency, 1, denyScanConcurrency))
 	var wg sync.WaitGroup
 	for i, root := range roots {
 		i, root := i, root
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i].matches, results[i].hitCap = walkOneDenyRoot(root, globs, protected, readDirs, cache)
+			results[i].matches, results[i].hitCap = walkOneDenyRoot(root, globs, protected, readDirs, cache, concurrency)
 		}()
 	}
 	wg.Wait()
@@ -755,7 +758,7 @@ func walkGlobMatches(roots, globs, protectedDirs []string, cache *denyScanCache)
 // still not followed: a folder listing reports a link as a link, and any
 // real-tree location the agent can reach belongs to some granted root
 // whose own scan emits its spelling.
-func walkOneDenyRoot(root string, globs []string, protected map[string]bool, readDirs chan struct{}, cache *denyScanCache) (matches []string, hitCap bool) {
+func walkOneDenyRoot(root string, globs []string, protected map[string]bool, readDirs chan struct{}, cache *denyScanCache, concurrency int) (matches []string, hitCap bool) {
 	resolved, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		resolved = root
@@ -858,7 +861,7 @@ func walkOneDenyRoot(root string, globs []string, protected map[string]bool, rea
 		busy  int
 		wg    sync.WaitGroup
 	)
-	for range denyScanConcurrency {
+	for range clampInt(concurrency, 1, denyScanConcurrency) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

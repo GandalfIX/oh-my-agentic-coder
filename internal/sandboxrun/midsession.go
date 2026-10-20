@@ -15,6 +15,15 @@ import (
 // minute; see denyScanCache for why a bound is needed at all.
 const midsessionFullPassTicks = 6
 
+// midsessionFullPassConcurrency is how many folders the interleaved
+// full pass reads in parallel. The pass re-reads every directory of
+// every root — on macOS each read pays a Seatbelt policy evaluation —
+// so at denyScanConcurrency it showed up as a periodic CPU spike on
+// large grants. It therefore runs at a small fraction of that
+// concurrency: the peak stays low, and the tick interval absorbs the
+// extra wall time.
+const midsessionFullPassConcurrency = 2
+
 // WatchNewProtected polls the deny-scan roots for files that match a
 // protected pattern but were created after the initial snapshot,
 // calling onNew for each. It blocks until stop is closed; the caller
@@ -55,7 +64,13 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 	protected := sandboxprofile.EffectiveProtectedPaths(base, p.Filesystem.OverrideDeny)
 	cache := newDenyScanCache()
 	resolve := func(scanCache *denyScanCache) ([]string, error) {
-		out, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, scanCache)
+		concurrency := denyScanConcurrency
+		if scanCache == nil {
+			// The full pass re-reads everything; keep its peak CPU low
+			// (see midsessionFullPassConcurrency).
+			concurrency = midsessionFullPassConcurrency
+		}
+		out, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, scanCache, concurrency)
 		if err == nil && len(byName.roots) > 0 {
 			// The folder grew past the cap during the session. The profile
 			// has no name rule for it, so stop as an incomplete scan does.
@@ -65,7 +80,7 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 	}
 
 	known := map[string]bool{}
-	initial, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, cache)
+	initial, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, cache, denyScanConcurrency)
 	if err != nil {
 		return err
 	}

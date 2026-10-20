@@ -52,7 +52,7 @@ func cacheTree(t *testing.T) string {
 
 func cacheWalk(t *testing.T, root string, cache *denyScanCache) []string {
 	t.Helper()
-	got, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, denyScanConcurrency), cache)
+	got, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, denyScanConcurrency), cache, denyScanConcurrency)
 	slices.Sort(got)
 	if hitCap {
 		t.Fatalf("unexpected cap hit walking %s", root)
@@ -216,7 +216,7 @@ func TestDenyScanCacheChargesCapAcrossPasses(t *testing.T) {
 		}
 	}
 	cache := newDenyScanCache()
-	if got, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, denyScanConcurrency), cache); hitCap || len(got) != 0 {
+	if got, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, denyScanConcurrency), cache, denyScanConcurrency); hitCap || len(got) != 0 {
 		t.Fatalf("first pass: matches %v, cap %v", got, hitCap)
 	}
 
@@ -228,8 +228,23 @@ func TestDenyScanCacheChargesCapAcrossPasses(t *testing.T) {
 		}
 	}
 	bump(t, big)
-	if _, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, denyScanConcurrency), cache); !hitCap {
+	if _, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, denyScanConcurrency), cache, denyScanConcurrency); !hitCap {
 		t.Fatal("incremental pass must report the cap after the tree outgrew it")
+	}
+}
+
+// TestDenyScanCacheThrottledConcurrency asserts the throttled full pass
+// (one reader at a time, as midsessionFullPassConcurrency runs it)
+// still walks correctly and finds the same matches.
+func TestDenyScanCacheThrottledConcurrency(t *testing.T) {
+	root := resolvePath(t, cacheTree(t))
+	got, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, 1), newDenyScanCache(), 1)
+	slices.Sort(got)
+	if hitCap {
+		t.Fatal("unexpected cap hit")
+	}
+	if want := filepath.Join(root, "sub1", "deep", ".env"); len(got) != 1 || got[0] != want {
+		t.Fatalf("throttled walk got %v, want [%s]", got, want)
 	}
 }
 

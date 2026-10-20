@@ -8,21 +8,44 @@ import (
 	"github.com/TNG/oh-my-agentic-coder/internal/sandboxprofile"
 )
 
-// midsessionFullPassTicks is how many incremental watch ticks run
-// before one full uncached pass interleaves (see WatchNewProtected).
-// With the default 10 s watch interval this bounds the worst-case
-// detection latency of the mid-session protected-file watch at one
-// minute; see denyScanCache for why a bound is needed at all.
-const midsessionFullPassTicks = 6
+// DefaultFullPassTicks and DefaultFullPassConcurrency are the
+// compiled-in watch tuning used when the launcher config does not
+// override it (config.SandboxConfig.MidsessionWatch mirrors these —
+// keep the two in sync; config cannot import sandboxrun). See
+// WatchNewProtected for what each knob does.
+const (
+	DefaultFullPassTicks       = 6
+	DefaultFullPassConcurrency = 2
+)
 
-// midsessionFullPassConcurrency is how many folders the interleaved
-// full pass reads in parallel. The pass re-reads every directory of
-// every root — on macOS each read pays a Seatbelt policy evaluation —
-// so at denyScanConcurrency it showed up as a periodic CPU spike on
-// large grants. It therefore runs at a small fraction of that
-// concurrency: the peak stays low, and the tick interval absorbs the
-// extra wall time.
-const midsessionFullPassConcurrency = 2
+// WatchTuning carries the launcher-configurable knobs of
+// WatchNewProtected. Zero fields fall back to the Default* constants.
+type WatchTuning struct {
+	// FullPassTicks is how many incremental ticks run before one full
+	// uncached pass interleaves. With the default 10 s watch interval
+	// the default of 6 bounds the worst-case detection latency at one
+	// minute; see denyScanCache for why a bound is needed at all.
+	// Higher values trade detection latency for less periodic CPU.
+	FullPassTicks int
+
+	// FullPassConcurrency is how many folders the full pass reads in
+	// parallel. The pass re-reads every directory of every root — on
+	// macOS each read pays a Seatbelt policy evaluation — so the
+	// default of 2 (a fraction of denyScanConcurrency) keeps its peak
+	// CPU low; the tick interval absorbs the extra wall time. It is
+	// clamped to at least 1 and at most the walk's normal concurrency.
+	FullPassConcurrency int
+}
+
+func (t WatchTuning) resolve() WatchTuning {
+	if t.FullPassTicks <= 0 {
+		t.FullPassTicks = DefaultFullPassTicks
+	}
+	if t.FullPassConcurrency <= 0 {
+		t.FullPassConcurrency = DefaultFullPassConcurrency
+	}
+	return t
+}
 
 // WatchNewProtected polls the deny-scan roots for files that match a
 // protected pattern but were created after the initial snapshot,
@@ -44,7 +67,7 @@ const midsessionFullPassConcurrency = 2
 // The walk carries a denyScanCache across ticks: the snapshot seeds it
 // and every tick re-walks incrementally, re-reading only directories
 // whose fingerprint changed since the previous pass, while every
-// midsessionFullPassTicks-th tick runs one full uncached pass. A tick's
+// tuning.FullPassTicks-th tick runs one full uncached pass. A tick's
 // result lists only matches from re-read directories — every match of
 // an unchanged directory was reported by an earlier pass, so new-match
 // detection is unchanged — and an idle pass costs one lstat per
@@ -55,7 +78,8 @@ const midsessionFullPassConcurrency = 2
 // timestamps come from the filesystem's coarse clock, so a change can
 // share the previous read's timestamps and slip past the incremental
 // passes (see denyScanCache).
-func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.Duration, onNew func(path string), stop <-chan struct{}) error {
+func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.Duration, onNew func(path string), stop <-chan struct{}, tuning WatchTuning) error {
+	tuning = tuning.resolve()
 	base := sandboxprofile.PlatformBaseline()
 	roots, err := denyScanRoots(p, workdir)
 	if err != nil {
@@ -63,13 +87,7 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 	}
 	protected := sandboxprofile.EffectiveProtectedPaths(base, p.Filesystem.OverrideDeny)
 	cache := newDenyScanCache()
-	resolve := func(scanCache *denyScanCache) ([]string, error) {
-		concurrency := denyScanConcurrency
-		if scanCache == nil {
-			// The full pass re-reads everything; keep its peak CPU low
-			// (see midsessionFullPassConcurrency).
-			concurrency = midsessionFullPassConcurrency
-		}
+	resolve := func(scanCache *denyScanCache, concurrency int) ([]string, error) {
 		out, byName, err := resolveDenyPaths(p.Filesystem.Deny, base.WorkdirProtected, p.Filesystem.OverrideDeny, roots, protected, nil, scanCache, concurrency)
 		if err == nil && len(byName.roots) > 0 {
 			// The folder grew past the cap during the session. The profile
@@ -108,10 +126,14 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 			// re-reads the directories that changed since it was last
 			// seeded, which is redundant but never wrong.
 			scanCache := cache
-			if ticks%midsessionFullPassTicks == 0 {
+			concurrency := denyScanConcurrency
+			if ticks%tuning.FullPassTicks == 0 {
 				scanCache = nil
+				// The full pass re-reads everything; keep its peak CPU
+				// low (see WatchTuning.FullPassConcurrency).
+				concurrency = tuning.FullPassConcurrency
 			}
-			current, err := resolve(scanCache)
+			current, err := resolve(scanCache, concurrency)
 			if err != nil {
 				return err
 			}

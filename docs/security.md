@@ -119,7 +119,9 @@ What happens then depends on the system:
   scan's timestamp and slip past an incremental scan; a full rescan every
   minute bounds this (run with reduced parallelism to keep its CPU
   impact low), so a mid-session `.env` file is detected within a
-  minute at worst and usually within 10 seconds. A file that appears and
+  minute at worst and usually within 10 seconds. Both the rescan
+  interval and its parallelism are configurable in the user config
+  (`sandbox.midsession_watch`); a file that appears and
   disappears between two scans is never detected.
 
 On macOS, keychain files are also blocked: the keychain folders

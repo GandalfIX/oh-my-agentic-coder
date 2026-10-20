@@ -50,8 +50,9 @@ type protectedWatch struct {
 // Returns nil when there is nothing to mirror (non-native launcher,
 // argv not a `omac sandbox run`); callers skip learn mode, where
 // nothing is protected. checker may be nil; audit events are dropped
-// when a is nil.
-func startProtectedWatch(a audit.Auditor, checker *sandboxrun.ProtectedPathSet, plan sandboxPlan, argv []string, workdir string) *protectedWatch {
+// when a is nil. tuning comes from the launcher config's
+// sandbox.midsession_watch block.
+func startProtectedWatch(a audit.Auditor, checker *sandboxrun.ProtectedPathSet, plan sandboxPlan, argv []string, workdir string, tuning sandboxrun.WatchTuning) *protectedWatch {
 	if !plan.Native || plan.Policy == nil || len(argv) < 3 || argv[1] != "sandbox" || argv[2] != "run" {
 		return nil
 	}
@@ -77,7 +78,7 @@ func startProtectedWatch(a audit.Auditor, checker *sandboxrun.ProtectedPathSet, 
 			if a != nil {
 				a.Emit(audit.ControlMutation("protected-file-watch", path, "created mid-session; readable until restart"))
 			}
-		}, w.stop); err != nil {
+		}, w.stop, tuning); err != nil {
 			w.record(fmt.Sprintf("protected-file watch not started: %v", err))
 		}
 	}()

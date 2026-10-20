@@ -22,7 +22,7 @@ func TestWatchNewProtected(t *testing.T) {
 	defer close(stop)
 	got := make(chan string, 8)
 	go func() {
-		if err := WatchNewProtected(p, dir, 10*time.Millisecond, func(path string) { got <- path }, stop); err != nil {
+		if err := WatchNewProtected(p, dir, 10*time.Millisecond, func(path string) { got <- path }, stop, WatchTuning{}); err != nil {
 			t.Errorf("WatchNewProtected: %v", err)
 		}
 	}()
@@ -67,7 +67,7 @@ func TestWatchNewProtectedOverrideDeny(t *testing.T) {
 	defer close(stop)
 	got := make(chan string, 8)
 	go func() {
-		if err := WatchNewProtected(p, dir, 10*time.Millisecond, func(path string) { got <- path }, stop); err != nil {
+		if err := WatchNewProtected(p, dir, 10*time.Millisecond, func(path string) { got <- path }, stop, WatchTuning{}); err != nil {
 			t.Errorf("WatchNewProtected: %v", err)
 		}
 	}()

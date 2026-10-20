@@ -234,7 +234,7 @@ func TestDenyScanCacheChargesCapAcrossPasses(t *testing.T) {
 }
 
 // TestDenyScanCacheThrottledConcurrency asserts the throttled full pass
-// (one reader at a time, as midsessionFullPassConcurrency runs it)
+// (one reader at a time, as the watch's throttled full pass runs it)
 // still walks correctly and finds the same matches.
 func TestDenyScanCacheThrottledConcurrency(t *testing.T) {
 	root := resolvePath(t, cacheTree(t))

@@ -106,9 +106,14 @@ type SandboxConfig struct {
 // the two in sync (config cannot import sandboxrun).
 type MidsessionWatchConfig struct {
 	// FullPassTicks is how many incremental watch ticks run before one
-	// full uncached re-scan interleaves. Higher values trade detection
-	// latency (worst case ticks × tick interval) for less periodic CPU.
-	FullPassTicks int `yaml:"full_pass_ticks" json:"full_pass_ticks"`
+	// full uncached re-scan interleaves. Unset uses the compiled-in
+	// default; 0 disables the full re-scan entirely — detection then
+	// rests on the incremental ticks alone, which miss changes that
+	// share the previous scan's coarse-clock timestamp (see
+	// sandboxrun.denyScanCache); N runs it every Nth tick, trading
+	// detection latency (worst case N × tick interval) for less
+	// periodic CPU.
+	FullPassTicks *int `yaml:"full_pass_ticks" json:"full_pass_ticks"`
 	// FullPassConcurrency is how many folders the full re-scan reads in
 	// parallel. Unset runs it at the walk's normal concurrency (a short
 	// full-core burst); set a lower value to flatten that burst at the
@@ -199,7 +204,7 @@ func defaultLauncherConfigFor(h Harness) LauncherConfig {
 		Sandbox: SandboxConfig{
 			DefaultProfile: "builtin",
 			MidsessionWatch: MidsessionWatchConfig{
-				FullPassTicks:       6,
+				FullPassTicks:       intPtr(6),
 				FullPassConcurrency: 0, // 0 = unthrottled (walk's normal concurrency)
 			},
 			Profiles: map[string]SandboxProfile{
@@ -487,18 +492,21 @@ func pickInt(override, fallback int) int {
 	return fallback
 }
 
-// validate rejects negative watch tuning: zero means "use the default",
-// a negative value would break the watch (a non-positive full-pass
-// interval would divide by zero in the tick counter).
+// validate rejects negative watch tuning: zero for full_pass_ticks
+// disables the full re-scan (a deliberate choice), a negative value
+// would break the watch (a non-positive full-pass interval would
+// divide by zero in the tick counter).
 func (m MidsessionWatchConfig) validate() error {
-	if m.FullPassTicks < 0 {
-		return fmt.Errorf("sandbox.midsession_watch.full_pass_ticks must be >= 0 (0 = default), got %d", m.FullPassTicks)
+	if m.FullPassTicks != nil && *m.FullPassTicks < 0 {
+		return fmt.Errorf("sandbox.midsession_watch.full_pass_ticks must be >= 0 (unset = default, 0 = disabled), got %d", *m.FullPassTicks)
 	}
 	if m.FullPassConcurrency < 0 {
 		return fmt.Errorf("sandbox.midsession_watch.full_pass_concurrency must be >= 0 (0 = default), got %d", m.FullPassConcurrency)
 	}
 	return nil
 }
+
+func intPtr(i int) *int { return &i }
 
 // pickInt64 returns override when non-zero, else fallback.
 func pickInt64(override, fallback int64) int64 {
@@ -513,7 +521,7 @@ func mergeDefaults(lc LauncherConfig) LauncherConfig {
 	if lc.Sandbox.DefaultProfile == "" {
 		lc.Sandbox.DefaultProfile = def.Sandbox.DefaultProfile
 	}
-	if lc.Sandbox.MidsessionWatch.FullPassTicks == 0 {
+	if lc.Sandbox.MidsessionWatch.FullPassTicks == nil {
 		lc.Sandbox.MidsessionWatch.FullPassTicks = def.Sandbox.MidsessionWatch.FullPassTicks
 	}
 	// FullPassConcurrency stays 0 when unset: zero means "run the full

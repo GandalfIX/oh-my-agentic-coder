@@ -57,6 +57,44 @@ func TestWatchNewProtected(t *testing.T) {
 	}
 }
 
+// TestWatchNewProtectedFullPassDisabled covers full_pass_ticks: 0: the
+// incremental ticks alone must still detect ordinary mid-session files
+// (only the coarse-clock blind window is left uncovered).
+func TestWatchNewProtectedFullPassDisabled(t *testing.T) {
+	dir := t.TempDir()
+	p := &sandboxprofile.Profile{}
+	p.Workdir.Access = sandboxprofile.AccessReadWrite
+
+	stop := make(chan struct{})
+	defer close(stop)
+	got := make(chan string, 8)
+	disabled := 0
+	go func() {
+		if err := WatchNewProtected(p, dir, 10*time.Millisecond, func(path string) { got <- path }, stop, WatchTuning{FullPassTicks: &disabled}); err != nil {
+			t.Errorf("WatchNewProtected: %v", err)
+		}
+	}()
+
+	// First tick = snapshot done.
+	select {
+	case path := <-got:
+		t.Fatalf("alerted on empty dir: %s", path)
+	case <-time.After(80 * time.Millisecond):
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case path := <-got:
+		if want := filepath.Join(dir, ".env"); path != want {
+			t.Fatalf("alerted %s, want %s", path, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no alert for mid-session .env with the full pass disabled")
+	}
+}
+
 func TestWatchNewProtectedOverrideDeny(t *testing.T) {
 	dir := t.TempDir()
 	p := &sandboxprofile.Profile{}

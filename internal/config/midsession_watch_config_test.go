@@ -16,11 +16,31 @@ func TestMidsessionWatchDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLauncher: %v", err)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 6 {
-		t.Errorf("FullPassTicks = %d, want 6", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got == nil || *got != 6 {
+		t.Errorf("FullPassTicks = %v, want unset → 6", got)
 	}
 	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 0 {
 		t.Errorf("FullPassConcurrency = %d, want 0 (unthrottled)", got)
+	}
+}
+
+// TestMidsessionWatchDisableFullPass asserts full_pass_ticks: 0 disables
+// the full re-scan (a deliberate user choice) instead of falling back to
+// the default, and survives the load path unchanged.
+func TestMidsessionWatchDisableFullPass(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeConfig(t, filepath.Join(home, ".config", "omac", "config.yaml"), `
+sandbox:
+  midsession_watch:
+    full_pass_ticks: 0
+`)
+	lc, _, err := LoadLauncher(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadLauncher: %v", err)
+	}
+	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got == nil || *got != 0 {
+		t.Errorf("FullPassTicks = %v, want 0 (disabled)", got)
 	}
 }
 
@@ -39,8 +59,8 @@ sandbox:
 	if err != nil {
 		t.Fatalf("LoadLauncher: %v", err)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 30 {
-		t.Errorf("FullPassTicks = %d, want 30", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got == nil || *got != 30 {
+		t.Errorf("FullPassTicks = %v, want 30", got)
 	}
 	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 2 {
 		t.Errorf("FullPassConcurrency = %d, want 2", got)
@@ -64,8 +84,8 @@ sandbox:
 	if err != nil {
 		t.Fatalf("LoadLauncher: %v", err)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 6 {
-		t.Errorf("a workdir config set full_pass_ticks to %d (want the default 6): a project can weaken its own detection bound", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got == nil || *got != 6 {
+		t.Errorf("a workdir config set full_pass_ticks to %v (want the default 6): a project can weaken its own detection bound", got)
 	}
 	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 0 {
 		t.Errorf("a workdir config set full_pass_concurrency to %d (want the default 0 = unthrottled)", got)

@@ -121,8 +121,9 @@ What happens then depends on the system:
   minute at worst and usually within 10 seconds. Both the rescan
   interval and its parallelism are configurable in the user config
   (`sandbox.midsession_watch`; by default the rescan runs at full
-  parallelism — a brief burst every minute — and can be throttled
-  there). A file that appears and
+  parallelism — a brief burst every minute — and can be throttled or
+  disabled there with `full_pass_ticks: 0`, which leaves the
+  same-timestamp blind window unbounded). A file that appears and
   disappears between two scans is never detected.
 
 On macOS, keychain files are also blocked: the keychain folders

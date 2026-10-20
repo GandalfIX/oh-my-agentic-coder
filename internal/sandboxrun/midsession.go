@@ -16,14 +16,18 @@ import (
 const DefaultFullPassTicks = 6
 
 // WatchTuning carries the launcher-configurable knobs of
-// WatchNewProtected. Zero fields fall back to the Default* constants.
+// WatchNewProtected. Zero/nil fields fall back to the defaults.
 type WatchTuning struct {
 	// FullPassTicks is how many incremental ticks run before one full
-	// uncached pass interleaves. With the default 10 s watch interval
-	// the default of 6 bounds the worst-case detection latency at one
-	// minute; see denyScanCache for why a bound is needed at all.
-	// Higher values trade detection latency for less periodic CPU.
-	FullPassTicks int
+	// uncached pass interleaves. Nil uses DefaultFullPassTicks; 0
+	// disables the full pass entirely — detection then rests on the
+	// incremental ticks alone, which miss changes that share the
+	// previous read's coarse-clock timestamps (see denyScanCache); N
+	// runs it every Nth tick. With the default 10 s watch interval the
+	// default of 6 bounds the worst-case detection latency at one
+	// minute. Higher values trade detection latency for less periodic
+	// CPU.
+	FullPassTicks *int
 
 	// FullPassConcurrency is how many folders the full pass reads in
 	// parallel. Zero (the default) runs it at the walk's normal
@@ -36,14 +40,19 @@ type WatchTuning struct {
 	FullPassConcurrency int
 }
 
-func (t WatchTuning) resolve() WatchTuning {
-	if t.FullPassTicks <= 0 {
-		t.FullPassTicks = DefaultFullPassTicks
+// resolvedTuning is WatchTuning with defaults filled in. fullPassTicks
+// 0 means the full pass is disabled.
+type resolvedTuning struct {
+	fullPassTicks       int
+	fullPassConcurrency int
+}
+
+func (t WatchTuning) resolve() resolvedTuning {
+	r := resolvedTuning{fullPassTicks: DefaultFullPassTicks, fullPassConcurrency: t.FullPassConcurrency}
+	if t.FullPassTicks != nil && *t.FullPassTicks >= 0 {
+		r.fullPassTicks = *t.FullPassTicks // 0 disables the full pass
 	}
-	if t.FullPassConcurrency < 0 {
-		t.FullPassConcurrency = 0
-	}
-	return t
+	return r
 }
 
 // WatchNewProtected polls the deny-scan roots for files that match a
@@ -78,7 +87,7 @@ func (t WatchTuning) resolve() WatchTuning {
 // share the previous read's timestamps and slip past the incremental
 // passes (see denyScanCache).
 func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.Duration, onNew func(path string), stop <-chan struct{}, tuning WatchTuning) error {
-	tuning = tuning.resolve()
+	t := tuning.resolve()
 	base := sandboxprofile.PlatformBaseline()
 	roots, err := denyScanRoots(p, workdir)
 	if err != nil {
@@ -126,13 +135,13 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 			// seeded, which is redundant but never wrong.
 			scanCache := cache
 			concurrency := denyScanConcurrency
-			if ticks%tuning.FullPassTicks == 0 {
+			if t.fullPassTicks > 0 && ticks%t.fullPassTicks == 0 {
 				scanCache = nil
 				// Opt-in throttle: a lower FullPassConcurrency trades a
 				// shallower CPU burst for a longer scan (see
 				// WatchTuning.FullPassConcurrency).
-				if tuning.FullPassConcurrency > 0 {
-					concurrency = tuning.FullPassConcurrency
+				if t.fullPassConcurrency > 0 {
+					concurrency = t.fullPassConcurrency
 				}
 			}
 			current, err := resolve(scanCache, concurrency)

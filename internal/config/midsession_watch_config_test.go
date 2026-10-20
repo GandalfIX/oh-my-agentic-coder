@@ -7,8 +7,8 @@ import (
 )
 
 // TestMidsessionWatchDefaults asserts the compiled-in tuning is used
-// when no config exists: the mid-session watch's full-pass cadence and
-// concurrency keep their sensible defaults.
+// when no config exists: the full pass runs every 6th tick, unthrottled
+// (concurrency 0 = the walk's normal concurrency).
 func TestMidsessionWatchDefaults(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workdir := t.TempDir()
@@ -19,8 +19,8 @@ func TestMidsessionWatchDefaults(t *testing.T) {
 	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 6 {
 		t.Errorf("FullPassTicks = %d, want 6", got)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 2 {
-		t.Errorf("FullPassConcurrency = %d, want 2", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 0 {
+		t.Errorf("FullPassConcurrency = %d, want 0 (unthrottled)", got)
 	}
 }
 
@@ -33,6 +33,7 @@ func TestMidsessionWatchGlobalConfigOverride(t *testing.T) {
 sandbox:
   midsession_watch:
     full_pass_ticks: 30
+    full_pass_concurrency: 2
 `)
 	lc, _, err := LoadLauncher(t.TempDir())
 	if err != nil {
@@ -42,7 +43,7 @@ sandbox:
 		t.Errorf("FullPassTicks = %d, want 30", got)
 	}
 	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 2 {
-		t.Errorf("FullPassConcurrency = %d, want the default 2", got)
+		t.Errorf("FullPassConcurrency = %d, want 2", got)
 	}
 }
 
@@ -66,8 +67,8 @@ sandbox:
 	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 6 {
 		t.Errorf("a workdir config set full_pass_ticks to %d (want the default 6): a project can weaken its own detection bound", got)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 2 {
-		t.Errorf("a workdir config set full_pass_concurrency to %d (want the default 2)", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 0 {
+		t.Errorf("a workdir config set full_pass_concurrency to %d (want the default 0 = unthrottled)", got)
 	}
 	_ = path
 }

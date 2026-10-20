@@ -101,8 +101,8 @@ type SandboxConfig struct {
 }
 
 // MidsessionWatchConfig tunes the mid-session protected-file watch.
-// Zero fields fall back to the compiled-in defaults, which mirror
-// sandboxrun's DefaultFullPassTicks / DefaultFullPassConcurrency — keep
+// Zero fields fall back to the compiled-in defaults; the concurrency
+// default is "unthrottled", mirroring sandboxrun's WatchTuning — keep
 // the two in sync (config cannot import sandboxrun).
 type MidsessionWatchConfig struct {
 	// FullPassTicks is how many incremental watch ticks run before one
@@ -110,9 +110,9 @@ type MidsessionWatchConfig struct {
 	// latency (worst case ticks × tick interval) for less periodic CPU.
 	FullPassTicks int `yaml:"full_pass_ticks" json:"full_pass_ticks"`
 	// FullPassConcurrency is how many folders the full re-scan reads in
-	// parallel. Lower values flatten its CPU spike at the cost of wall
-	// time; it is clamped to at least 1 and at most the walk's normal
-	// concurrency.
+	// parallel. Unset runs it at the walk's normal concurrency (a short
+	// full-core burst); set a lower value to flatten that burst at the
+	// cost of a proportionally longer scan.
 	FullPassConcurrency int `yaml:"full_pass_concurrency" json:"full_pass_concurrency"`
 }
 
@@ -200,7 +200,7 @@ func defaultLauncherConfigFor(h Harness) LauncherConfig {
 			DefaultProfile: "builtin",
 			MidsessionWatch: MidsessionWatchConfig{
 				FullPassTicks:       6,
-				FullPassConcurrency: 2,
+				FullPassConcurrency: 0, // 0 = unthrottled (walk's normal concurrency)
 			},
 			Profiles: map[string]SandboxProfile{
 				// builtin re-execs the running omac binary as
@@ -516,9 +516,8 @@ func mergeDefaults(lc LauncherConfig) LauncherConfig {
 	if lc.Sandbox.MidsessionWatch.FullPassTicks == 0 {
 		lc.Sandbox.MidsessionWatch.FullPassTicks = def.Sandbox.MidsessionWatch.FullPassTicks
 	}
-	if lc.Sandbox.MidsessionWatch.FullPassConcurrency == 0 {
-		lc.Sandbox.MidsessionWatch.FullPassConcurrency = def.Sandbox.MidsessionWatch.FullPassConcurrency
-	}
+	// FullPassConcurrency stays 0 when unset: zero means "run the full
+	// pass at the walk's normal concurrency" (unthrottled).
 	// Merge built-in profiles into the map so a config declaring custom
 	// profiles cannot erase the compiled-in ones (e.g. "builtin").
 	if lc.Sandbox.Profiles == nil {

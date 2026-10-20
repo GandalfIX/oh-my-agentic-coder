@@ -8,15 +8,12 @@ import (
 	"github.com/TNG/oh-my-agentic-coder/internal/sandboxprofile"
 )
 
-// DefaultFullPassTicks and DefaultFullPassConcurrency are the
-// compiled-in watch tuning used when the launcher config does not
-// override it (config.SandboxConfig.MidsessionWatch mirrors these —
-// keep the two in sync; config cannot import sandboxrun). See
-// WatchNewProtected for what each knob does.
-const (
-	DefaultFullPassTicks       = 6
-	DefaultFullPassConcurrency = 2
-)
+// DefaultFullPassTicks is the compiled-in full-pass cadence used when
+// the launcher config does not override it (config.SandboxConfig.
+// MidsessionWatch mirrors it — keep the two in sync; config cannot
+// import sandboxrun). The full pass itself runs at the walk's normal
+// concurrency unless tuned down via WatchTuning.FullPassConcurrency.
+const DefaultFullPassTicks = 6
 
 // WatchTuning carries the launcher-configurable knobs of
 // WatchNewProtected. Zero fields fall back to the Default* constants.
@@ -29,11 +26,13 @@ type WatchTuning struct {
 	FullPassTicks int
 
 	// FullPassConcurrency is how many folders the full pass reads in
-	// parallel. The pass re-reads every directory of every root — on
-	// macOS each read pays a Seatbelt policy evaluation — so the
-	// default of 2 (a fraction of denyScanConcurrency) keeps its peak
-	// CPU low; the tick interval absorbs the extra wall time. It is
-	// clamped to at least 1 and at most the walk's normal concurrency.
+	// parallel. Zero (the default) runs it at the walk's normal
+	// concurrency: a short full-core burst every FullPassTicks ticks.
+	// A lower value flattens that burst at the cost of a proportionally
+	// longer scan — at 2 a pass that took seconds takes most of the
+	// tick interval, so the CPU drag can end up more noticeable than
+	// the spike it replaces. It is clamped to at least 1 and at most
+	// the walk's normal concurrency.
 	FullPassConcurrency int
 }
 
@@ -41,8 +40,8 @@ func (t WatchTuning) resolve() WatchTuning {
 	if t.FullPassTicks <= 0 {
 		t.FullPassTicks = DefaultFullPassTicks
 	}
-	if t.FullPassConcurrency <= 0 {
-		t.FullPassConcurrency = DefaultFullPassConcurrency
+	if t.FullPassConcurrency < 0 {
+		t.FullPassConcurrency = 0
 	}
 	return t
 }
@@ -129,9 +128,12 @@ func WatchNewProtected(p *sandboxprofile.Profile, workdir string, interval time.
 			concurrency := denyScanConcurrency
 			if ticks%tuning.FullPassTicks == 0 {
 				scanCache = nil
-				// The full pass re-reads everything; keep its peak CPU
-				// low (see WatchTuning.FullPassConcurrency).
-				concurrency = tuning.FullPassConcurrency
+				// Opt-in throttle: a lower FullPassConcurrency trades a
+				// shallower CPU burst for a longer scan (see
+				// WatchTuning.FullPassConcurrency).
+				if tuning.FullPassConcurrency > 0 {
+					concurrency = tuning.FullPassConcurrency
+				}
 			}
 			current, err := resolve(scanCache, concurrency)
 			if err != nil {

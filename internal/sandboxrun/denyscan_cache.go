@@ -3,7 +3,18 @@ package sandboxrun
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// dirTimestampWindow is how close a directory's mtime/ctime must be to
+// the read that cached it for that read to be re-checked on the next
+// pass. It covers the coarse-clock window in which a later change can
+// reuse the cached timestamp: HFS+ is 1 s, FAT/exFAT and common network
+// mounts are 1-2 s. A read that fell inside the window costs one extra
+// directory listing on the next pass, which is tiny at idle and removes
+// the need for a periodic full re-walk. A variable so tests can control
+// it.
+var dirTimestampWindow = 2 * time.Second
 
 // dirFingerprint identifies a directory's metadata state: the (sec,
 // nsec) pairs of its mtime and ctime plus the inode and device from the
@@ -19,8 +30,10 @@ import (
 // clock (whole seconds on HFS+, a few milliseconds on ext4, coarser
 // still on FAT/exFAT and network mounts), so a change landing in the
 // same tick as the previous read can leave every field unchanged. The
-// mid-session watch bounds this: every few ticks it runs one full
-// uncached pass that re-reads everything (see WatchNewProtected).
+// mid-session watch handles this without a full re-walk: a read that
+// falls within one timestamp tick of the directory's mtime/ctime is
+// flagged and lists the directory once more on the next pass (see
+// dirTimestampWindow and denyScanDirState.recheck).
 type dirFingerprint struct {
 	mtimeSec, mtimeNsec int64
 	ctimeSec, ctimeNsec int64
@@ -60,10 +73,13 @@ func (f dirFingerprint) equal(o dirFingerprint) bool {
 //
 // Detection bound: a directory change that lands in the same
 // coarse-clock tick as the previous read can share its timestamps (see
-// dirFingerprint), so a pass between full re-reads can miss it. The
-// watch therefore interleaves full uncached passes, which bounds the
-// worst-case detection latency at the full-pass interval instead of the
-// tick interval.
+// dirFingerprint). The cache therefore flags a read that fell within
+// dirTimestampWindow of the directory's mtime/ctime and lists that
+// directory once more on the next pass (denyScanDirState.recheck), so a
+// hidden change is detected one tick later. That covers filesystems
+// whose timestamps are at most as coarse as dirTimestampWindow; the
+// mid-session watch keeps an opt-in full pass as a backstop for coarser
+// ones.
 type denyScanCache struct {
 	mu    sync.Mutex
 	roots map[string]*denyScanRootState
@@ -90,6 +106,12 @@ type denyScanDirState struct {
 	fp      dirFingerprint
 	count   int64
 	subdirs []string
+	// recheck marks a read that happened within dirTimestampWindow of
+	// the directory's own mtime/ctime. A later change in that same
+	// coarse-clock tick would leave the fingerprint unchanged, so the
+	// next pass must read this directory once more even though fp
+	// matches.
+	recheck bool
 }
 
 func newDenyScanCache() *denyScanCache {
@@ -111,12 +133,16 @@ func (c *denyScanCache) state(root string) *denyScanRootState {
 // unchanged reports the cached state of dir when the walk can skip
 // re-reading it. A non-directory (a granted file used as a scan root)
 // never yields entries to match, so once known it is skipped for good;
-// a directory is skipped only while its fingerprint is unchanged.
+// a directory is skipped only while its fingerprint is unchanged and
+// its last read did not fall inside the coarse-timestamp window.
 func (r *denyScanRootState) unchanged(dir string, fp dirFingerprint, isDir bool) (*denyScanDirState, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.dirs[dir]
 	if !ok || e.isDir != isDir {
+		return nil, false
+	}
+	if e.recheck {
 		return nil, false
 	}
 	if !isDir || e.fp.equal(fp) {
@@ -130,6 +156,21 @@ func (r *denyScanRootState) unchanged(dir string, fp dirFingerprint, isDir bool)
 // or renamed, so their cached state is dropped. A later pass then reads
 // such a path from scratch should it reappear.
 func (r *denyScanRootState) record(dir string, fp dirFingerprint, isDir bool, count int64, subdirs []string) {
+	// A read that lands in the same coarse-clock tick as the directory's
+	// own timestamps leaves a window in which a later change reuses those
+	// timestamps. Flag it so the next pass reads the directory once more
+	// even though the fingerprint cannot tell the difference.
+	recheck := false
+	if isDir {
+		for _, ts := range [...]time.Time{
+			time.Unix(fp.mtimeSec, fp.mtimeNsec),
+			time.Unix(fp.ctimeSec, fp.ctimeNsec),
+		} {
+			if age := time.Since(ts); age >= 0 && age <= dirTimestampWindow {
+				recheck = true
+			}
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if old, ok := r.dirs[dir]; ok {
@@ -143,7 +184,7 @@ func (r *denyScanRootState) record(dir string, fp dirFingerprint, isDir bool, co
 			}
 		}
 	}
-	r.dirs[dir] = &denyScanDirState{isDir: isDir, fp: fp, count: count, subdirs: subdirs}
+	r.dirs[dir] = &denyScanDirState{isDir: isDir, fp: fp, count: count, subdirs: subdirs, recheck: recheck}
 }
 
 // forget drops dir and everything below it from the cache, e.g. after

@@ -57,10 +57,10 @@ func TestWatchNewProtected(t *testing.T) {
 	}
 }
 
-// TestWatchNewProtectedFullPassDisabled covers full_pass_ticks: 0: the
-// incremental ticks alone must still detect ordinary mid-session files
-// (only the coarse-clock blind window is left uncovered).
-func TestWatchNewProtectedFullPassDisabled(t *testing.T) {
+// TestWatchNewProtectedFullPassOff covers the default full_pass_ticks: 0:
+// the incremental ticks and the per-directory re-check must still detect
+// ordinary mid-session files.
+func TestWatchNewProtectedFullPassOff(t *testing.T) {
 	dir := t.TempDir()
 	p := &sandboxprofile.Profile{}
 	p.Workdir.Access = sandboxprofile.AccessReadWrite
@@ -68,9 +68,8 @@ func TestWatchNewProtectedFullPassDisabled(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
 	got := make(chan string, 8)
-	disabled := 0
 	go func() {
-		if err := WatchNewProtected(p, dir, 10*time.Millisecond, func(path string) { got <- path }, stop, WatchTuning{FullPassTicks: &disabled}); err != nil {
+		if err := WatchNewProtected(p, dir, 10*time.Millisecond, func(path string) { got <- path }, stop, WatchTuning{}); err != nil {
 			t.Errorf("WatchNewProtected: %v", err)
 		}
 	}()
@@ -91,7 +90,33 @@ func TestWatchNewProtectedFullPassDisabled(t *testing.T) {
 			t.Fatalf("alerted %s, want %s", path, want)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("no alert for mid-session .env with the full pass disabled")
+		t.Fatal("no alert for mid-session .env with the full pass off (default)")
+	}
+}
+
+// TestFullPassDue covers the opt-in full-pass cadence, including the
+// positive path the old constant made untestable: 0 is off, N fires on
+// every Nth tick.
+func TestFullPassDue(t *testing.T) {
+	cases := []struct {
+		name    string
+		ticks   int
+		cadence int
+		want    bool
+	}{
+		{"off", 6, 0, false},
+		{"before", 5, 6, false},
+		{"due", 6, 6, true},
+		{"later", 12, 6, true},
+		{"every", 1, 1, true},
+		{"first", 0, 6, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (resolvedTuning{fullPassTicks: tc.cadence}).fullPassDue(tc.ticks); got != tc.want {
+				t.Errorf("fullPassDue(ticks=%d, cadence=%d) = %v, want %v", tc.ticks, tc.cadence, got, tc.want)
+			}
+		})
 	}
 }
 

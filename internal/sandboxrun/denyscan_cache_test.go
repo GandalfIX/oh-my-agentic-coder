@@ -63,6 +63,7 @@ func cacheWalk(t *testing.T, root string, cache *denyScanCache) []string {
 // TestDenyScanCacheFirstPassMatchesSequential asserts the seeded pass
 // (cache attached but empty) finds what the uncached walk finds.
 func TestDenyScanCacheFirstPassMatchesSequential(t *testing.T) {
+	steadyState(t)
 	root := cacheTree(t)
 	got := cacheWalk(t, root, newDenyScanCache())
 	want := []string{filepath.Join(root, "sub1", "deep", ".env")}
@@ -75,6 +76,7 @@ func TestDenyScanCacheFirstPassMatchesSequential(t *testing.T) {
 // nothing: every directory is lstat'd (the traversal must still reach
 // them), no directory is re-read, and no match is reported again.
 func TestDenyScanCacheSkipsUnchangedDirs(t *testing.T) {
+	steadyState(t)
 	root := cacheTree(t)
 	cache := newDenyScanCache()
 	rc := cache.state(root)
@@ -106,6 +108,7 @@ func TestDenyScanCacheSkipsUnchangedDirs(t *testing.T) {
 // file in a deep untouched directory: only the ancestors on the way
 // down changed, and exactly that subtree is re-read and matched.
 func TestDenyScanCacheFindsNewMatchOnlyInChangedDirs(t *testing.T) {
+	steadyState(t)
 	root := cacheTree(t)
 	cache := newDenyScanCache()
 	if got := cacheWalk(t, root, cache); len(got) != 1 {
@@ -137,6 +140,7 @@ func TestDenyScanCacheFindsNewMatchOnlyInChangedDirs(t *testing.T) {
 // recreates it with a match: the cache must not serve the stale state
 // of the removed directories.
 func TestDenyScanCacheReconcilesRemovedDirs(t *testing.T) {
+	steadyState(t)
 	root := cacheTree(t)
 	cache := newDenyScanCache()
 	if got := cacheWalk(t, root, cache); len(got) != 1 {
@@ -170,6 +174,7 @@ func TestDenyScanCacheReconcilesRemovedDirs(t *testing.T) {
 // later passes retire it with one lstat — even after the file is
 // rewritten.
 func TestDenyScanCacheFileRootSkipsReaddirs(t *testing.T) {
+	steadyState(t)
 	file := filepath.Join(t.TempDir(), "dotfile")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -203,6 +208,7 @@ func TestDenyScanCacheFileRootSkipsReaddirs(t *testing.T) {
 // tree (cached counts for unchanged directories, fresh counts for
 // changed ones) and report the cap like a full recount would.
 func TestDenyScanCacheChargesCapAcrossPasses(t *testing.T) {
+	steadyState(t)
 	setDenyScanLimit(t, 40)
 	setDenyByName(t, true)
 	root := t.TempDir()
@@ -237,6 +243,7 @@ func TestDenyScanCacheChargesCapAcrossPasses(t *testing.T) {
 // (one reader at a time, as the watch's throttled full pass runs it)
 // still walks correctly and finds the same matches.
 func TestDenyScanCacheThrottledConcurrency(t *testing.T) {
+	steadyState(t)
 	root := resolvePath(t, cacheTree(t))
 	got, hitCap := walkOneDenyRoot(root, []string{".env"}, map[string]bool{}, make(chan struct{}, 1), newDenyScanCache(), 1)
 	slices.Sort(got)
@@ -256,6 +263,7 @@ func TestDenyScanCacheThrottledConcurrency(t *testing.T) {
 // detected. Instead the stale entry keeps its old fingerprint, so the
 // next pass re-reads the directory and finds the match.
 func TestDenyScanCacheSurvivesTransientReadError(t *testing.T) {
+	steadyState(t)
 	root := resolvePath(t, cacheTree(t))
 	cache := newDenyScanCache()
 	if got := cacheWalk(t, root, cache); len(got) != 1 {
@@ -317,6 +325,7 @@ func resolvePath(t *testing.T, dir string) string {
 // Chtimes call itself updates it — so the pass must still re-read and
 // find the match an mtime-only fingerprint would hide.
 func TestDenyScanCacheDetectsBackdatedMtime(t *testing.T) {
+	steadyState(t)
 	root := resolvePath(t, cacheTree(t))
 	cache := newDenyScanCache()
 	if got := cacheWalk(t, root, cache); len(got) != 1 {
@@ -348,6 +357,7 @@ func TestDenyScanCacheDetectsBackdatedMtime(t *testing.T) {
 // a chmod leaves mtime alone, so an mtime-only fingerprint would serve
 // the stale cached state of a folder whose readability changed.
 func TestDenyScanCacheDetectsChmodReveal(t *testing.T) {
+	steadyState(t)
 	root := resolvePath(t, cacheTree(t))
 	deep := filepath.Join(root, "sub1", "deep")
 	cache := newDenyScanCache()
@@ -371,5 +381,89 @@ func TestDenyScanCacheDetectsChmodReveal(t *testing.T) {
 	}
 	if reads := cache.state(root).readdirs.Load(); reads-readsAfterFirst != 1 {
 		t.Errorf("pass after chmod re-read %d directories, want 1", reads-readsAfterFirst)
+	}
+}
+
+// steadyState makes dirTimestampWindow zero for tests that model a tree
+// that has not been touched near the scan; otherwise every freshly
+// created directory would be re-checked once, which is the intended
+// production behavior but not what those tests assert.
+func steadyState(t *testing.T) {
+	t.Helper()
+	old := dirTimestampWindow
+	dirTimestampWindow = 0
+	t.Cleanup(func() { dirTimestampWindow = old })
+}
+
+// TestDenyScanCacheRechecksCoarseTimestampWindow simulates the race the
+// optional full pass exists for: a directory is read just before a
+// change that lands in the same coarse-clock tick, so the fingerprint
+// after the change equals the cached one. The read-time window must
+// force one extra read on the next pass, which finds the new match
+// without a full re-walk of the whole tree.
+func TestDenyScanCacheRechecksCoarseTimestampWindow(t *testing.T) {
+	steadyState(t)
+	root := resolvePath(t, cacheTree(t))
+	cache := newDenyScanCache()
+	if got := cacheWalk(t, root, cache); len(got) != 1 {
+		t.Fatalf("first pass got %v", got)
+	}
+
+	deep := filepath.Join(root, "sub2", "deep")
+	e := cache.state(root).dirs[deep]
+	if e == nil {
+		t.Fatal("sub2/deep was not cached")
+	}
+	if err := os.WriteFile(filepath.Join(deep, ".env"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The hidden change: the cached entries predate .env, but the
+	// fingerprint is the post-change one (identical to the cached
+	// fingerprint on a coarse-clock filesystem).
+	info, err := os.Lstat(deep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := dirTimestampWindow
+	dirTimestampWindow = time.Hour
+	cache.state(root).record(deep, fingerprintOf(info), true, e.count, e.subdirs)
+	dirTimestampWindow = old
+
+	got := cacheWalk(t, root, cache)
+	want := filepath.Join(deep, ".env")
+	if !slices.Contains(got, want) {
+		t.Fatalf("pass after a same-tick change got %v, want %s", got, want)
+	}
+}
+
+// TestDenyScanCacheRecheckClears asserts the re-check is a one-shot: a
+// directory read inside the window is listed once more, and that second
+// read (now outside the window) is cached normally again. Without this a
+// regression that always set recheck to true would re-read the whole
+// tree on every tick and quietly bring the CPU burn back.
+func TestDenyScanCacheRecheckClears(t *testing.T) {
+	old := dirTimestampWindow
+	t.Cleanup(func() { dirTimestampWindow = old })
+	dirTimestampWindow = time.Hour
+
+	root := resolvePath(t, cacheTree(t))
+	cache := newDenyScanCache()
+	if got := cacheWalk(t, root, cache); len(got) != 1 {
+		t.Fatalf("first pass got %v", got)
+	}
+
+	// Model the next tick: the directory's timestamps are now outside
+	// the window, so the re-check read must not flag it again.
+	dirTimestampWindow = time.Nanosecond
+	if got := cacheWalk(t, root, cache); len(got) != 1 {
+		t.Fatalf("re-check pass got %v", got)
+	}
+	reads := cache.state(root).readdirs.Load()
+
+	if got := cacheWalk(t, root, cache); len(got) != 0 {
+		t.Fatalf("steady pass reported %v", got)
+	}
+	if after := cache.state(root).readdirs.Load(); after != reads {
+		t.Errorf("steady pass re-read %d directories, want 0", after-reads)
 	}
 }

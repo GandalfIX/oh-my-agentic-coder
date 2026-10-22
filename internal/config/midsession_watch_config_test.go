@@ -7,8 +7,9 @@ import (
 )
 
 // TestMidsessionWatchDefaults asserts the compiled-in tuning is used
-// when no config exists: the full pass runs every 6th tick, unthrottled
-// (concurrency 0 = the walk's normal concurrency).
+// when no config exists: the optional full pass is off (the per-directory
+// re-check covers the same-tick window) and concurrency is unthrottled
+// (0 = the walk's normal concurrency).
 func TestMidsessionWatchDefaults(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workdir := t.TempDir()
@@ -16,18 +17,17 @@ func TestMidsessionWatchDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadLauncher: %v", err)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got == nil || *got != 6 {
-		t.Errorf("FullPassTicks = %v, want unset → 6", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 0 {
+		t.Errorf("FullPassTicks = %d, want 0 (off)", got)
 	}
 	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 0 {
 		t.Errorf("FullPassConcurrency = %d, want 0 (unthrottled)", got)
 	}
 }
 
-// TestMidsessionWatchDisableFullPass asserts full_pass_ticks: 0 disables
-// the full re-scan (a deliberate user choice) instead of falling back to
-// the default, and survives the load path unchanged.
-func TestMidsessionWatchDisableFullPass(t *testing.T) {
+// TestMidsessionWatchExplicitZero asserts an explicit full_pass_ticks: 0
+// is accepted and stays off, rather than being treated as invalid.
+func TestMidsessionWatchExplicitZero(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeConfig(t, filepath.Join(home, ".config", "omac", "config.yaml"), `
@@ -39,8 +39,8 @@ sandbox:
 	if err != nil {
 		t.Fatalf("LoadLauncher: %v", err)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got == nil || *got != 0 {
-		t.Errorf("FullPassTicks = %v, want 0 (disabled)", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 0 {
+		t.Errorf("FullPassTicks = %d, want 0 (off)", got)
 	}
 }
 
@@ -59,8 +59,8 @@ sandbox:
 	if err != nil {
 		t.Fatalf("LoadLauncher: %v", err)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got == nil || *got != 30 {
-		t.Errorf("FullPassTicks = %v, want 30", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 30 {
+		t.Errorf("FullPassTicks = %d, want 30", got)
 	}
 	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 2 {
 		t.Errorf("FullPassConcurrency = %d, want 2", got)
@@ -80,32 +80,42 @@ sandbox:
     full_pass_ticks: 1000000
     full_pass_concurrency: 1
 `)
-	lc, path, err := LoadLauncher(workdir)
+	lc, _, err := LoadLauncher(workdir)
 	if err != nil {
 		t.Fatalf("LoadLauncher: %v", err)
 	}
-	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got == nil || *got != 6 {
-		t.Errorf("a workdir config set full_pass_ticks to %v (want the default 6): a project can weaken its own detection bound", got)
+	if got := lc.Sandbox.MidsessionWatch.FullPassTicks; got != 0 {
+		t.Errorf("a workdir config set full_pass_ticks to %d (want the default 0 = off): a project can weaken its own detection bound", got)
 	}
 	if got := lc.Sandbox.MidsessionWatch.FullPassConcurrency; got != 0 {
 		t.Errorf("a workdir config set full_pass_concurrency to %d (want the default 0 = unthrottled)", got)
 	}
-	_ = path
 }
 
 // TestMidsessionWatchRejectsNegative asserts a negative tuning value is
-// a config error, not a silently broken watch (a non-positive full-pass
-// interval would divide by zero in the tick counter).
+// a config error instead of a silently clamped no-op.
 func TestMidsessionWatchRejectsNegative(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	writeConfig(t, filepath.Join(home, ".config", "omac", "config.yaml"), `
+	cases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{"ticks", "full_pass_ticks: -3", "full_pass_ticks"},
+		{"concurrency", "full_pass_concurrency: -1", "full_pass_concurrency"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			writeConfig(t, filepath.Join(home, ".config", "omac", "config.yaml"), `
 sandbox:
   midsession_watch:
-    full_pass_ticks: -3
+    `+tc.yaml+`
 `)
-	_, _, err := LoadLauncher(t.TempDir())
-	if err == nil || !strings.Contains(err.Error(), "full_pass_ticks") {
-		t.Fatalf("LoadLauncher err = %v, want a full_pass_ticks validation error", err)
+			_, _, err := LoadLauncher(t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("LoadLauncher err = %v, want a %s validation error", err, tc.want)
+			}
+		})
 	}
 }

@@ -17,11 +17,12 @@ import (
 // deny-scan roots looking for files a protected pattern matched only
 // after launch. Each tick re-walks incrementally: a denyScanCache
 // carries every directory's fingerprint between ticks, so unchanged
-// directories cost one lstat and only changed ones are re-read, and
-// every few ticks a full pass bounds the coarse-clock blind window.
-// Worst-case detection latency is therefore the full-pass interval, not
-// this constant; a file that appears and disappears within one interval
-// is never detected. See sandboxrun.denyScanCache.
+// directories cost one lstat and only changed ones are re-read. A
+// directory whose last read fell inside the coarse-timestamp window is
+// listed once more on the next tick, so worst-case detection latency is
+// one tick; an optional full pass (off by default) is a backstop for
+// coarser filesystems. A file that appears and disappears within one
+// interval is never detected. See sandboxrun.denyScanCache.
 const midsessionProtectedWatchInterval = 10 * time.Second
 
 // protectedWatch records what the mid-session protected-file watch
